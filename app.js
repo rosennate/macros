@@ -758,6 +758,7 @@ function viewSettings() {
   ${provBlock('xai')}${provBlock('gemini')}
   <div class="card" style="margin-top:12px"><div class="field"><label for="xBk">Include keys in backup file</label><span class="switch"><input type="checkbox" id="xBk" ${xai.inBackup ? 'checked' : ''}></span></div></div>
   <div class="foot">Keys are stored only in this app’s on-device storage (never in the data backup unless the switch above is on) and sent only to the provider they belong to. Photos you analyze are sent to that provider. <button id="xHelp" style="color:var(--accent)">How to get a key…</button></div>
+  <div class="foot" style="text-align:center">App version ${APP_VERSION}</div>
     <div class="section-title">Appearance</div>
   <div class="card"><div class="field" style="padding:8px 16px"><div class="seg" id="theme" style="flex:1">${['system', 'light', 'dark'].map(x => `<button data-t="${x}" class="${S().theme === x ? 'on' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}</div></div></div>
   <div class="section-title">Backup</div>
@@ -891,26 +892,48 @@ const AI_PROMPT = `Identify each distinct food or drink in the photo and estimat
 Return exactly this JSON shape:
 {"items":[{"name":"string","portion_household":"e.g. 1 cup, 2 slices, 1 medium","portion_grams":number,"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number,"confidence":"low|medium|high"}],"totals":{"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number},"notes":"short string"}
 Rules: numbers are for the whole portion shown (not per 100 g); calories should roughly equal 4*protein + 4*carbs + 9*fat; include cooking fats/sauces you can reasonably infer; split mixed plates into separate items; if the photo has no food return {"items":[],"totals":{"calories":0,"protein_g":0,"carbs_g":0,"fat_g":0},"notes":"no food found"}.`;
-class AiErr extends Error { constructor(kind, msg) { super(msg); this.kind = kind; } }
-function downscale(file, max = 1024) {
-  return new Promise((res, rej) => {
-    const url = URL.createObjectURL(file), img = new Image();
-    img.onload = () => {
-      const sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight)), w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
-      const cv = document.createElement('canvas'); cv.width = w; cv.height = h; const cx = cv.getContext('2d');
-      cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h); cx.drawImage(img, 0, 0, w, h); URL.revokeObjectURL(url);
-      res({ url: cv.toDataURL('image/jpeg', 0.82), w, h });
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); rej(new AiErr('image', 'That image couldn’t be opened. Try a JPEG or PNG photo.')); };
-    img.src = url;
-  });
+const APP_VERSION = 'v7';
+const AIT = { first: 60000, retry: 40000, xai: 75000, decode: 15000, ...(window.__AIT || {}) }; // request timeouts (ms)
+class AiErr extends Error { constructor(kind, msg, info = {}) { super(msg); this.kind = kind; this.info = info; } }
+const withTimeout = (p, ms, kind, msg) => new Promise((res, rej) => { const t = setTimeout(() => rej(new AiErr(kind, msg)), ms); p.then(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); }); });
+// Decode a picked photo. Tries <img> first, then createImageBitmap; each guarded by a timeout so a stuck HEIC decode can't hang the UI.
+async function decodeImage(file) {
+  const tryImg = () => new Promise((res, rej) => { const url = URL.createObjectURL(file), img = new Image(); img.onload = () => res({ src: img, w: img.naturalWidth, h: img.naturalHeight, done: () => URL.revokeObjectURL(url) }); img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('decode failed')); }; img.src = url; });
+  let why = 'unreadable';
+  try { return await withTimeout(tryImg(), AIT.decode, 'imgtimeout', 'timeout'); } catch (e) { why = e.kind === 'imgtimeout' ? 'decoder stuck >' + AIT.decode / 1000 + 's' : 'decode error'; }
+  if (typeof createImageBitmap === 'function') { try { const bm = await withTimeout(createImageBitmap(file), AIT.decode, 'imgtimeout', 'timeout'); return { src: bm, w: bm.width, h: bm.height, done: () => bm.close && bm.close() }; } catch (e) { why += ' / bitmap failed'; } }
+  throw new AiErr('image', `This photo couldn’t be read (${file.type || 'unknown type'}, ${(file.size / 1048576).toFixed(1)} MB; ${why}). Try choosing it from Photo Library again, or set iPhone Settings → Camera → Formats → Most Compatible.`);
 }
+async function downscale(file, max = 1024, onStatus = () => { }) {
+  if (!file.size) throw new AiErr('image', 'That photo is empty (0 bytes). Pick it again.');
+  onStatus(`Reading photo (${(file.size / 1048576).toFixed(1)} MB${file.type ? ', ' + file.type.replace('image/', '') : ''})…`);
+  const d = await decodeImage(file);
+  onStatus(`Resizing ${d.w}×${d.h} photo to ${max}px…`);
+  const sc = Math.min(1, max / Math.max(d.w, d.h)), w = Math.max(1, Math.round(d.w * sc)), h = Math.max(1, Math.round(d.h * sc));
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h; const cx = cv.getContext('2d');
+  cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h); cx.drawImage(d.src, 0, 0, w, h); d.done();
+  const url = cv.toDataURL('image/jpeg', 0.8);
+  if (!/^data:image\/jpeg;base64,.{200,}/.test(url)) throw new AiErr('image', 'The photo couldn’t be converted to JPEG on this device. Try a different photo.');
+  return { url, w, h, kb: Math.round(url.length * 0.75 / 1024), orig: `${d.w}×${d.h}, ${(file.size / 1048576).toFixed(1)} MB` };
+}
+// fetch with a hard timeout covering headers AND body, so a stalled connection can't hang forever.
+async function fetchT(url, opts, ms, outer, who) {
+  const ctl = new AbortController(); let timedOut = false; const onAbort = () => ctl.abort();
+  if (outer) { if (outer.aborted) throw new DOMException('Aborted', 'AbortError'); outer.addEventListener('abort', onAbort); }
+  const t = setTimeout(() => { timedOut = true; ctl.abort(); }, ms), t0 = Date.now();
+  try { const r = await fetch(url, { ...opts, signal: ctl.signal }); const text = await r.text(); return { ok: r.ok, status: r.status, text, ms: Date.now() - t0 }; }
+  catch (e) {
+    if (timedOut) throw new AiErr('timeout', `${who} didn’t answer within ${Math.round(ms / 1000)} s.`, { status: 'timeout' });
+    if (outer?.aborted) throw e;
+    throw new AiErr('network', `Couldn’t reach ${who} (${e && e.message ? e.message : 'network error'}). Check your connection and try again.`, { status: 'network' });
+  } finally { clearTimeout(t); outer?.removeEventListener('abort', onAbort); }
+}
+const jsonOr = t => { try { return JSON.parse(t); } catch (e) { return null; } };
 async function xaiPost(body, signal) {
-  let r;
-  try { r = await fetch(XAI_URL + '/chat/completions', { method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + xai.key }, body: JSON.stringify(body) }); }
-  catch (e) { if (e && e.name === 'AbortError') throw e; throw new AiErr('network', 'Couldn’t reach xAI. Check your connection and try again.'); }
-  if (r.ok) return r.json();
-  const t = await r.text().catch(() => ''); let m = ''; try { const j = JSON.parse(t); m = j.error?.message || j.error || j.message || ''; } catch (e) { m = t; }
+  const r = await fetchT(XAI_URL + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + xai.key }, body: JSON.stringify(body) }, AIT.xai, signal, 'xAI');
+  const j = jsonOr(r.text);
+  if (r.ok) { if (!j) throw new AiErr('parse', 'xAI sent a reply that wasn’t JSON.', { status: r.status, raw: r.text.slice(0, 200) }); return j; }
+  const m = j ? (j.error?.message || j.error || j.message || '') : r.text;
   throw aiHttpErr('xai', r.status, typeof m === 'string' ? m : JSON.stringify(m));
 }
 function parseMealJson(text) {
@@ -926,50 +949,78 @@ function parseMealJson(text) {
   return { items, notes: String(j.notes || '').slice(0, 300) };
 }
 function aiHttpErr(pv, status, m) {
-  const nm = PV[pv].name; m = String(m || '').slice(0, 300);
-  if (status === 401 || /api key (not valid|rejected)|incorrect api key|API_KEY_INVALID/i.test(m)) return new AiErr('badkey', `${nm} rejected your API key. Check it in Settings (copy the whole key).`);
-  if (status === 403) return new AiErr('forbidden', `${nm} refused the request (403). The key may lack access${pv === 'gemini' ? ', or the Gemini API may not be available in your region' : ' or the account may be out of credits'}.` + (m ? ' — ' + m : ''));
-  if (status === 429) return new AiErr('rate', pv === 'gemini'
-    ? 'Gemini’s free-tier quota is used up (429). Free keys have per-minute and per-day request limits (the daily count resets at midnight Pacific). Wait a minute and tap Try again — or try again later today / tomorrow, switch model in Settings, or check your usage in Google AI Studio.'
+  const nm = PV[pv].name; const raw = String(m || '').slice(0, 400), info = { status, raw, model: aiModel(pv) };
+  const E = (k, msg) => new AiErr(k, msg, info);
+  if (status === 401 || /api key (not valid|rejected)|incorrect api key|API_KEY_INVALID/i.test(raw)) return E('badkey', `${nm} rejected your API key. Check it in Settings (copy the whole key).`);
+  if (status === 403) return E('forbidden', `${nm} refused the request (403). The key may lack access${pv === 'gemini' ? ', or the Gemini API may not be available in your region' : ' or the account may be out of credits'}.`);
+  if (status === 429) return E('rate', pv === 'gemini'
+    ? 'Gemini’s free-tier quota is used up (429). Free keys have per-minute and per-day request limits (the daily count resets at midnight Pacific). Wait a minute and tap Try again — or try again later, switch model in Settings, or check your usage in Google AI Studio.'
     : 'xAI says you’re sending too many requests or are out of credits (429). Wait a moment and retry.');
-  if (status === 404) return new AiErr('nomodel', `${nm} doesn’t know the model “${aiModel(pv)}”. Pick another model in Settings.`);
-  if (status >= 500) return new AiErr('server', `${nm} had a problem (${status}). Try again in a minute.`);
-  return new AiErr('http' + status, `${nm} couldn’t process this request (${status}).${m ? ' ' + m : ''}`);
+  if (status === 404) return E('nomodel', `${nm} doesn’t know the model “${aiModel(pv)}” (404).`);
+  if (status >= 500) return E('server', `${nm} had a problem (HTTP ${status}). It may be overloaded — try again in a minute.`);
+  return E('http' + status, `${nm} couldn’t process this request (HTTP ${status}).`);
 }
-async function geminiPost(body, signal) {
-  let r;
-  try { r = await fetch(`${GEM_URL}/models/${encodeURIComponent(xai.gModel)}:generateContent`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', 'x-goog-api-key': xai.gKey }, body: JSON.stringify(body) }); }
-  catch (e) { if (e && e.name === 'AbortError') throw e; throw new AiErr('network', 'Couldn’t reach Google. Check your connection and try again.'); }
-  if (r.ok) return r.json();
-  const t = await r.text().catch(() => ''); let m = ''; try { const j = JSON.parse(t); m = j.error?.message || ''; } catch (e) { m = t; }
-  throw aiHttpErr('gemini', r.status, m);
+async function geminiPost(model, body, signal, ms) {
+  const r = await fetchT(`${GEM_URL}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': xai.gKey }, body: JSON.stringify(body) }, ms, signal, 'Google Gemini');
+  const j = jsonOr(r.text);
+  if (r.ok) { if (!j) throw new AiErr('parse', 'Gemini sent a reply that wasn’t JSON.', { status: r.status, model, raw: r.text.slice(0, 200) }); return { j, ms: r.ms }; }
+  const e = aiHttpErr('gemini', r.status, j ? (j.error?.message || '') : r.text); e.info.model = model; e.message = e.message.replace(/“[^”]*”/, `“${model}”`); throw e;
 }
-async function estimateMeal(dataUrl, notes, signal) {
-  const pv = aiProv();
+const GEM_FALLBACKS = ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.8-flash'];
+const FALLBACK_KINDS = new Set(['timeout', 'nomodel', 'rate', 'server']);
+async function estimateMeal(img, notes, signal, onStatus = () => { }) {
+  const pv = aiProv(), dataUrl = img.url;
   if (!aiKey(pv)) throw new AiErr('nokey', `Add your ${PV[pv].name} API key in Settings first.`);
   if (navigator.onLine === false) throw new AiErr('offline', 'You’re offline. Photo estimates need an internet connection.');
   const text = AI_PROMPT + (notes ? `\nUser notes about this meal (trust these): ${notes}` : '');
-  let res, out;
   if (pv === 'gemini') {
-    const body = { systemInstruction: { parts: [{ text: AI_SYS }] }, contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: dataUrl.split(',')[1] } }, { text }] }], generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 8192, thinkingConfig: { thinkingLevel: 'low' } } };
-    try { res = await geminiPost(body, signal); }
-    catch (e) { if (e instanceof AiErr && e.kind === 'http400') { delete body.generationConfig.thinkingConfig; res = await geminiPost(body, signal); } else throw e; }
-    const cand = res?.candidates?.[0];
-    if (!cand) throw new AiErr('parse', res?.promptFeedback?.blockReason ? `Google blocked this photo (${res.promptFeedback.blockReason}). Try a different one.` : 'Gemini returned no answer. Try again.');
-    out = parseMealJson((cand.content?.parts || []).filter(x => !x.thought).map(x => x.text || '').join(''));
-    out.model = res.modelVersion || xai.gModel;
-  } else {
-    const body = { model: xai.model, stream: false, max_completion_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }, { type: 'text', text }] }] };
-    if (/^grok-4\.[567]/.test(xai.model)) body.reasoning_effort = 'low';
-    try { res = await xaiPost(body, signal); }
-    catch (e) { if (e instanceof AiErr && e.kind === 'http400') { delete body.response_format; delete body.reasoning_effort; res = await xaiPost(body, signal); } else throw e; }
-    const msg = res?.choices?.[0]?.message?.content;
-    out = parseMealJson(Array.isArray(msg) ? msg.map(x => x.text || '').join('') : msg);
-    out.model = res.model || xai.model;
+    const models = [xai.gModel, ...GEM_FALLBACKS.filter(m => m !== xai.gModel)].slice(0, 3), tried = [];
+    for (let k = 0; k < models.length; k++) {
+      const model = models[k], ms = k ? AIT.retry : AIT.first;
+      const body = { systemInstruction: { parts: [{ text: AI_SYS }] }, contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: dataUrl.split(',')[1] } }, { text }] }], generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 8192, thinkingConfig: { thinkingLevel: 'low' } } };
+      onStatus(`Sending to Gemini (${model}) — ${img.kb} KB…`);
+      try {
+        let res;
+        try { res = await geminiPost(model, body, signal, ms); }
+        catch (e) { if (e instanceof AiErr && e.kind === 'http400' && !/api key/i.test(e.info.raw || '')) { delete body.generationConfig.thinkingConfig; onStatus(`Retrying ${model} without thinking options…`); res = await geminiPost(model, body, signal, ms); } else throw e; }
+        onStatus(`Reading result (${(res.ms / 1000).toFixed(1)} s)…`);
+        const cand = res.j?.candidates?.[0];
+        if (!cand) throw new AiErr('parse', res.j?.promptFeedback?.blockReason ? `Google blocked this photo (${res.j.promptFeedback.blockReason}). Try a different one.` : 'Gemini returned no answer. Try again.', { model, raw: JSON.stringify(res.j).slice(0, 300) });
+        let out;
+        try { out = parseMealJson((cand.content?.parts || []).filter(x => !x.thought).map(x => x.text || '').join('')); }
+        catch (e) { if (e instanceof AiErr) { e.info = { ...e.info, model, raw: JSON.stringify(cand).slice(0, 300), status: 'finish=' + (cand.finishReason || '?') }; } throw e; }
+        out.model = model; if (tried.length) out.via = `Used ${model} — ${tried.join('; ')}.`;
+        return out;
+      } catch (e) {
+        if (!(e instanceof AiErr)) throw e;
+        e.info = { ...e.info, model: e.info.model || model }; tried.push(`${model}: ${e.kind === 'timeout' ? 'timed out' : e.info.status || e.kind}`);
+        e.info.tried = tried.slice();
+        if (FALLBACK_KINDS.has(e.kind) && k < models.length - 1) { onStatus(`${model} failed (${e.kind === 'timeout' ? 'no answer in ' + Math.round(ms / 1000) + ' s' : e.info.status}) — trying ${models[k + 1]}…`); continue; }
+        throw e;
+      }
+    }
   }
-  return out;
+  const body = { model: xai.model, stream: false, max_completion_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }, { type: 'text', text }] }] };
+  if (/^grok-4\.[567]/.test(xai.model)) body.reasoning_effort = 'low';
+  onStatus(`Sending to xAI (${xai.model}) — ${img.kb} KB…`);
+  let res;
+  try { res = await xaiPost(body, signal); }
+  catch (e) { if (e instanceof AiErr && e.kind === 'http400' && !/api key/i.test(e.info.raw || '')) { delete body.response_format; delete body.reasoning_effort; res = await xaiPost(body, signal); } else { if (e instanceof AiErr) e.info.model = xai.model; throw e; } }
+  onStatus('Reading result…');
+  const msg = res?.choices?.[0]?.message?.content;
+  const out = parseMealJson(Array.isArray(msg) ? msg.map(x => x.text || '').join('') : msg);
+  out.model = res.model || xai.model; return out;
 }
 let aiCtl = null;
+let aiStat = null; // live status line for the wait sheet
+const setStat = t => { if (aiStat) { aiStat.txt = t; tickStat(); } };
+const tickStat = () => { const el = $('#aiStat'); if (el && aiStat) el.innerHTML = `${esc(aiStat.txt)}<br><small>${Math.round((Date.now() - aiStat.t0) / 1000)} s elapsed</small>`; };
+function waitSheet(title, first, onCancel) {
+  aiStat = { txt: first, t0: Date.now() }; clearInterval(aiStat.iv);
+  sheet({ title: 'Photo estimate', left: { label: 'Cancel', fn: () => { endStat(); onCancel?.(); closeSheet(); } }, body: `<div class="aiwait"><div class="spin"></div><div id="aiStat"></div><small>${esc(title)}</small></div>` });
+  tickStat(); aiStat.iv = setInterval(tickStat, 1000);
+}
+const endStat = () => { if (aiStat) { clearInterval(aiStat.iv); aiStat = null; } };
 function startPhoto(file) {
   if (!aiKey(aiProv())) {
     sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">Add an API key (free Google Gemini key, or xAI Grok) to use photo estimates. It stays on this device.</div>
@@ -977,39 +1028,46 @@ function startPhoto(file) {
       mount: b => { $('#aiToSet', b).onclick = () => { closeSheet(); ui.tab = 'settings'; render(); }; $('#aiHelp0', b).onclick = openAiHelp; } });
     return;
   }
-  sheet({ title: 'Photo estimate', left: { label: 'Cancel' }, body: `<div class="aiwait"><div class="spin"></div><div>Preparing photo…</div></div>` });
-  downscale(file).then(img => openPhotoPrep(img, ''), e => aiError(e, null));
+  let cancelled = false;
+  waitSheet('Step 1 of 2: preparing the photo on your phone', 'Preparing photo…', () => { cancelled = true; });
+  downscale(file, 1024, setStat).then(img => { endStat(); if (!cancelled && sheetOpen) openPhotoPrep(img, ''); }, e => { endStat(); if (!cancelled && sheetOpen) aiError(e, null, null, '', 'prepare'); });
 }
 function openPhotoPrep(img, notes) {
   sheet({ title: 'Photo estimate', left: { label: 'Cancel' }, body: `<div class="stack" style="margin-top:10px">
     <img class="aithumb" src="${img.url}" alt="Meal photo">
     <div class="card"><div class="field"><input type="text" id="aiNotes" placeholder="Notes (optional) — e.g. cooked in olive oil" value="${esc(notes)}" style="text-align:left" autocomplete="off" enterkeyhint="go"></div></div>
     <button class="btn" id="aiGo">Estimate calories &amp; macros</button>
-    <div class="foot" style="text-align:center">Sent to ${PV[aiProv()].name} (${esc(aiModel(aiProv()))}) at ${img.w}×${img.h}.${aiProv() === 'gemini' ? ' Free-tier requests may be used by Google to improve its products.' : ''} Estimates can be off — you’ll review before logging.</div></div>`,
+    <div class="foot" style="text-align:center">Photo ready: ${img.w}×${img.h} JPEG, ${img.kb} KB (from ${esc(img.orig)}). Will be sent to ${PV[aiProv()].name} (${esc(aiModel(aiProv()))}).${aiProv() === 'gemini' ? ' Free-tier requests may be used by Google to improve its products.' : ''} Estimates can be off — you’ll review before logging.</div></div>`,
     mount: b => { const go = () => runEstimate(img, $('#aiNotes', b).value.trim()); $('#aiGo', b).onclick = go; $('#aiNotes', b).onkeydown = e => { if (e.key === 'Enter') go(); }; } });
 }
 async function runEstimate(img, notes) {
   aiCtl?.abort(); const ctl = aiCtl = new AbortController();
-  sheet({ title: 'Photo estimate', left: { label: 'Cancel', fn: () => { ctl.abort(); closeSheet(); } }, body: `<div class="aiwait"><div class="spin"></div><div>Asking the AI to look at your meal…</div><small>Usually 5–30 seconds</small></div>` });
-  const to = setTimeout(() => ctl.abort('timeout'), 90000);
-  try { const out = await estimateMeal(img.url, notes, ctl.signal); clearTimeout(to); if (!sheetOpen || ctl.signal.aborted) return; openAiReview(img, notes, out); }
-  catch (e) { clearTimeout(to); if (e && e.name === 'AbortError') { if (ctl.signal.reason === 'timeout' && sheetOpen) aiError(new AiErr('timeout', 'xAI took too long to answer. Try again.'), () => runEstimate(img, notes), img, notes); return; } if (sheetOpen) aiError(e, () => runEstimate(img, notes), img, notes); }
+  waitSheet(`Step 2 of 2: asking ${PV[aiProv()].name}`, 'Starting…', () => ctl.abort());
+  try { const out = await estimateMeal(img, notes, ctl.signal, setStat); endStat(); if (!sheetOpen || ctl.signal.aborted) return; openAiReview(img, notes, out); }
+  catch (e) { endStat(); if (e && e.name === 'AbortError') return; if (sheetOpen) aiError(e, () => runEstimate(img, notes), img, notes, 'estimate'); }
 }
-function aiError(e, retry, img, notes) {
-  const kind = e instanceof AiErr ? e.kind : 'unknown', msg = e instanceof AiErr ? e.message : 'Something went wrong. Try again.';
-  const needKey = kind === 'badkey' || kind === 'nokey';
+function aiError(e, retry, img, notes, stage) {
+  const kind = e instanceof AiErr ? e.kind : 'unknown'; let msg = e instanceof AiErr ? e.message : 'Something went wrong: ' + (e && e.message ? e.message : e);
+  if (e instanceof AiErr && e.info?.tried?.length > 1) msg += ` (Tried ${e.info.tried.length} models.)`;
+  if (kind === 'timeout' && aiProv() === 'gemini') msg += ' Tip: pick “Gemini 3.5 Flash-Lite” in Settings for faster answers, or try again in a minute.';
+  const needKey = kind === 'badkey' || kind === 'nokey', info = (e instanceof AiErr ? e.info : {}) || {}, pv = aiProv();
+  const detail = [`app ${APP_VERSION}`, `stage: ${stage || '?'}`, `provider: ${PV[pv].name}`, `model: ${info.model || aiModel(pv)}`, `error: ${kind}${info.status ? ' / ' + info.status : ''}`, info.raw ? `api says: ${info.raw}` : '', info.tried?.length ? `tried: ${info.tried.join('; ')}` : '', `time: ${new Date().toISOString()}`].filter(Boolean).join('\n');
   sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">${esc(msg)}</div>
     ${needKey ? '<button class="btn" id="aiToSet">Open Settings</button><button class="btn secondary" id="aiH">How to get a key</button>' : (retry ? '<button class="btn" id="aiRetry">Try again</button>' : '')}
-    ${img ? '<button class="btn gray" id="aiBack">Edit notes / photo</button>' : ''}<button class="btn gray" id="aiManual">Enter food manually</button></div>`,
+    ${img ? '<button class="btn gray" id="aiBack">Edit notes / photo</button>' : ''}<button class="btn gray" id="aiManual">Enter food manually</button>
+    <div class="note" style="white-space:pre-wrap;word-break:break-word;font-size:12px;font-family:ui-monospace,Menlo,monospace" id="aiDetail">${esc(detail)}</div>
+    <button class="btn gray" id="aiCopy">Copy error details</button></div>`,
     mount: b => {
       $('#aiToSet', b)?.addEventListener('click', () => { closeSheet(); ui.tab = 'settings'; render(); }); $('#aiH', b)?.addEventListener('click', openAiHelp);
       $('#aiRetry', b)?.addEventListener('click', retry); $('#aiBack', b)?.addEventListener('click', () => openPhotoPrep(img, notes));
       $('#aiManual', b).onclick = () => openFood({ mode: 'new', food: { name: '', cal: 0, p: 0, c: 0, f: 0 }, back: openAdd });
+      $('#aiCopy', b).onclick = async () => { try { await navigator.clipboard.writeText(detail); toast('Copied'); } catch (er) { const r = document.createRange(); r.selectNodeContents($('#aiDetail', b)); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast('Selected — tap Copy'); } };
     } });
 }
+
 function openAiReview(img, notes, out) {
   const items = out.items;
-  if (!items.length) { aiError(new AiErr('empty', 'The AI didn’t see any food in that photo' + (out.notes ? ` (“${out.notes}”)` : '') + '. Try a closer, brighter shot.'), null, img, notes); return; }
+  if (!items.length) { aiError(new AiErr('empty', 'The AI didn’t see any food in that photo' + (out.notes ? ` (“${out.notes}”)` : '') + '. Try a closer, brighter shot.'), null, img, notes, 'review'); return; }
   const st = { mode: 'sep', meal: '' };
   const line = i => ({ cal: i.cal * i.mult, p: i.p * i.mult, c: i.c * i.mult, f: i.f * i.mult });
   const tots = () => items.filter(i => i.on).reduce((a, i) => { const l = line(i); a.cal += l.cal; a.p += l.p; a.c += l.c; a.f += l.f; a.n++; return a; }, { cal: 0, p: 0, c: 0, f: 0, n: 0 });
@@ -1019,7 +1077,7 @@ function openAiReview(img, notes, out) {
     <div class="aimac">${[['cal', 'kcal'], ['p', 'P g'], ['c', 'C g'], ['f', 'F g']].map(([key, l]) => `<label><input type="text" inputmode="decimal" class="aiM" data-k="${key}" value="${i[key]}"><span>${l}</span></label>`).join('')}</div>
     <div class="aimult"><span>Portion ×</span><button class="mini aiMinus" aria-label="Less">−</button><input type="text" inputmode="decimal" class="aiMult" value="${i.mult}"><button class="mini aiPlus" aria-label="More">+</button><span class="aicount"></span></div></div>`;
   const body = `<div class="aireview">
-    <div class="airow-top"><img class="aithumb sm" src="${img.url}" alt=""><div class="note warn" style="flex:1"><b>AI estimate — may be off.</b> Check portions and edit anything that looks wrong before logging.${out.notes ? `<br><i>${esc(out.notes)}</i>` : ''}</div></div>
+    <div class="airow-top"><img class="aithumb sm" src="${img.url}" alt=""><div class="note warn" style="flex:1"><b>AI estimate — may be off.</b> Check portions and edit anything that looks wrong before logging.${out.notes ? `<br><i>${esc(out.notes)}</i>` : ''}${out.via ? `<br><small>${esc(out.via)}</small>` : ''}</div></div>
     <div class="aitot card" id="aiTot"></div>
     <div id="aiItems">${items.map(rowHtml).join('')}</div>
     <div class="seg" id="aiMode" style="margin:14px 0 8px"><button data-m="sep" class="on">Separate entries</button><button data-m="one">One combined meal</button></div>
