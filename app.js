@@ -9,6 +9,9 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
 const num = v => { const n = parseFloat(String(v ?? '').replace(',', '.')); return Number.isFinite(n) ? n : 0; };
 const r0 = n => Math.round(n);
+// Robust quantity parser for servings/grams/macro inputs: '1.5', '.5', '1,5', '2.' -> number; empty/invalid/zero-or-less -> null (caller should NOT update).
+const parseQty = (v, allowZero = false) => { const t = String(v ?? '').trim().replace(',', '.'); if (!/^(\d+\.?\d*|\.\d+)$/.test(t)) return null; const n = parseFloat(t); if (!Number.isFinite(n) || n > 100000 || (n <= 0 && !allowZero)) return null; return n; };
+const rnd2 = n => Math.round((n + Number.EPSILON) * 100) / 100;
 const fmt = n => { const v = Math.round((n + Number.EPSILON) * 10) / 10; return String(v); };
 const clamp = (n, a, b) => Math.min(b, Math.max(a, n));
 
@@ -148,7 +151,7 @@ function viewToday() {
   <div class="card">${list.length ? `<ul class="list">${list.map(e => {
     const s = e.servings;
     return `<li><button class="row entry" data-id="${e.id}"><div class="grow"><div class="nm">${esc(e.name)}</div>
-      <div class="meta">${e.barcode ? ICON.barcode : ''}${fmt(s)} × ${esc(e.serving || 'serving')} · P ${r0(e.p * s)} · C ${r0(e.c * s)} · F ${r0(e.f * s)}</div></div>
+      <div class="meta">${e.barcode ? ICON.barcode : ''}${rnd2(s)} × ${esc(e.serving || 'serving')} · P ${r0(e.p * s)} · C ${r0(e.c * s)} · F ${r0(e.f * s)}</div></div>
       <div class="kcal">${r0(e.cal * s)}<small>kcal</small></div></button></li>`;
   }).join('')}</ul>` : `<div class="empty">Nothing logged ${isToday ? 'yet today' : 'this day'}.<br>Tap <b>Add Food</b> to scan a barcode or enter a meal.</div>`}</div>
   </div>`;
@@ -423,38 +426,47 @@ function openFood({ mode, food, servings = 1, entry, note, noteWarn, back }) {
       <div class="card">
         <div class="field"><label for="fName">Name</label><input type="text" id="fName" value="${esc(f.name)}" placeholder="e.g. Chicken bowl" autocomplete="off" autocapitalize="words"></div>
         <div class="field"><label for="fBc">Barcode</label><input type="text" inputmode="numeric" id="fBc" value="${esc(f.barcode || '')}" placeholder="Optional — remembers this food" autocomplete="off"></div>
-        <div class="field"><label for="fSrv">Servings</label><div class="stepper"><button type="button" id="sMinus" aria-label="Fewer">−</button><input type="text" inputmode="decimal" id="fSrv" value="${fmt(servings)}"><button type="button" id="sPlus" aria-label="More">+</button></div></div>
+        <div class="field"><label for="fSrv">Servings</label><div class="stepper"><button type="button" id="sMinus" aria-label="Fewer">−</button><input type="text" inputmode="decimal" id="fSrv" value="${rnd2(servings)}"><button type="button" id="sPlus" aria-label="More">+</button></div></div>
         ${hasPorts ? `<div class="field"><label for="fPort">Portion</label><select id="fPort">${portOpts}</select></div>` : ''}${hasGrams ? row('fG', 'Serving size', fmt(grams0), '', 'g') : `<div class="field"><label for="fSrvL">Serving</label><input type="text" id="fSrvL" value="${esc(f.serving || '')}" placeholder="e.g. 1 cup" autocomplete="off"></div>`}
       </div>
-      <div class="section-title" style="margin:6px 16px 0">Macros per serving</div>
+      <div class="section-title" style="margin:6px 16px 0" id="mt">Total for 1 serving</div>
       <div class="card">
-        ${row('fCal', 'Calories', r0(num(f.cal)), 'var(--cal)', 'kcal')}${row('fP', 'Protein', fmt(num(f.p)), 'var(--pro)', 'g')}${row('fC', 'Carbs', fmt(num(f.c)), 'var(--carb)', 'g')}${row('fF', 'Fat', fmt(num(f.f)), 'var(--fat)', 'g')}
+        ${row('fCal', 'Calories', r0(num(f.cal) * servings), 'var(--cal)', 'kcal')}${row('fP', 'Protein', fmt(num(f.p) * servings), 'var(--pro)', 'g')}${row('fC', 'Carbs', fmt(num(f.c) * servings), 'var(--carb)', 'g')}${row('fF', 'Fat', fmt(num(f.f) * servings), 'var(--fat)', 'g')}
       </div>
-      ${hasGrams ? `<div class="foot" style="margin-top:-4px">Per 100 g: ${r0(f.per100.cal)} kcal · P ${fmt(f.per100.p)} · C ${fmt(f.per100.c)} · F ${fmt(f.per100.f)}. Change the serving size and macros update.</div>` : ''}
-      <div class="card"><div class="preview" id="pv"></div></div>
+      <div class="foot" style="margin-top:-4px" id="perS"></div>
+      ${hasGrams ? `<div class="foot" style="margin-top:-4px">Per 100 g: ${r0(f.per100.cal)} kcal · P ${fmt(f.per100.p)} · C ${fmt(f.per100.c)} · F ${fmt(f.per100.f)}. Change the serving size and the macros update.</div>` : ''}
       <div class="card"><div class="field"><label for="fFav">Keep in Favorites</label><span class="switch"><input type="checkbox" id="fFav" ${(f.saved || (f.id && data.foods[f.id]?.saved)) ? 'checked' : ''}></span></div></div>
       ${mode === 'edit' ? '<button class="btn danger" id="del">Delete Entry</button>' : ''}
       ${mode !== 'edit' ? `<p class="foot" style="text-align:center">Will be logged to ${esc(dayName)}</p>` : ''}
     </div>`,
     mount: b => {
       const g = id => $('#' + id, b);
+      // base = macros for ONE serving (what gets saved on the entry); the visible fields show base x servings, live.
+      const base = { cal: num(f.cal), p: num(f.p), c: num(f.c), f: num(f.f) };
+      let curS = parseQty(servings) || 1;
+      const FIELDS = [['fCal', 'cal', v => String(r0(v))], ['fP', 'p', fmt], ['fC', 'c', fmt], ['fF', 'f', fmt]];
       const updatePv = () => {
-        const s = num(g('fSrv').value);
-        g('pv').innerHTML = [['kcal', s * num(g('fCal').value), 0], ['Protein', s * num(g('fP').value), 1], ['Carbs', s * num(g('fC').value), 1], ['Fat', s * num(g('fF').value), 1]]
-          .map(([l, v, d]) => `<div><div class="n">${d ? fmt(v) + 'g' : r0(v)}</div><div class="l">${l}</div></div>`).join('');
+        const lab = g('mt'); if (lab) lab.textContent = `Total for ${rnd2(curS)} serving${curS === 1 ? '' : 's'}`;
+        const ps = g('perS'); if (ps) ps.textContent = `Per serving: ${r0(base.cal)} kcal · P ${fmt(base.p)} · C ${fmt(base.c)} · F ${fmt(base.f)}`;
+        const sr = $('#shR'); if (sr) sr.textContent = `${saveLabel} · ${r0(base.cal * curS)} kcal`;
       };
-      const autoCalc = () => { if (!calTouched) g('fCal').value = r0(4 * num(g('fP').value) + 4 * num(g('fC').value) + 9 * num(g('fF').value)); };
-      ['fP', 'fC', 'fF'].forEach(id => g(id).addEventListener('input', () => { autoCalc(); updatePv(); }));
-      g('fCal').addEventListener('input', () => { calTouched = true; updatePv(); });
-      g('fSrv').addEventListener('input', updatePv);
-      const step = d => { g('fSrv').value = fmt(Math.max(0, Math.round((num(g('fSrv').value) + d) * 100) / 100)); updatePv(); };
+      const showFields = skip => FIELDS.forEach(([id, k, fm]) => { if (id !== skip) g(id).value = fm(base[k] * curS); });
+      const autoCalc = () => { if (!calTouched) base.cal = 4 * base.p + 4 * base.c + 9 * base.f; };
+      ['fP', 'fC', 'fF'].forEach(id => g(id).addEventListener('input', () => {
+        const v = parseQty(g(id).value, true); if (v === null) return; // empty/invalid: leave everything alone
+        base[FIELDS.find(x => x[0] === id)[1]] = v / curS; autoCalc(); showFields(id); updatePv();
+      }));
+      g('fCal').addEventListener('input', () => { const v = parseQty(g('fCal').value, true); if (v === null) return; calTouched = true; base.cal = v / curS; updatePv(); });
+      g('fSrv').addEventListener('input', () => { const q = parseQty(g('fSrv').value); if (q === null) return; curS = q; showFields(); updatePv(); });
+      const step = d => { const n = Math.max(0.25, Math.round(((parseQty(g('fSrv').value) ?? curS) + d) * 100) / 100); g('fSrv').value = String(rnd2(n)); g('fSrv').dispatchEvent(new Event('input')); };
       g('sMinus').onclick = () => step(-0.5); g('sPlus').onclick = () => step(0.5);
       const syncPort = gm => { const sel = g('fPort'); if (!sel) return; const i = ports.findIndex(p => p[1] === gm); sel.value = i >= 0 ? String(i) : 'custom'; };
       if (hasPorts) g('fPort').addEventListener('change', e => { if (e.target.value === 'custom') { g('fG').focus(); g('fG').select(); return; } g('fG').value = fmt(ports[+e.target.value][1]); g('fG').dispatchEvent(new Event('input')); });
       if (hasGrams) g('fG').addEventListener('input', () => {
-        const gm = num(g('fG').value), p = f.per100; syncPort(gm);
-        g('fCal').value = r0(p.cal * gm / 100); g('fP').value = fmt(p.p * gm / 100); g('fC').value = fmt(p.c * gm / 100); g('fF').value = fmt(p.f * gm / 100); calTouched = true; updatePv();
+        const gm = parseQty(g('fG').value); if (gm === null) return; const p = f.per100; syncPort(gm);
+        base.cal = p.cal * gm / 100; base.p = p.p * gm / 100; base.c = p.c * gm / 100; base.f = p.f * gm / 100; calTouched = true; showFields(); updatePv();
       });
+      g('fSrv').dataset.base = '1'; b.__fb = { base, get s() { return curS; } };
       updatePv();
       if (mode === 'edit') g('del').onclick = () => {
         if (!confirm('Delete this entry?')) return;
@@ -467,18 +479,19 @@ function openFood({ mode, food, servings = 1, entry, note, noteWarn, back }) {
     },
   });
   function submit() {
-    const b = $('#sheetRoot'); const g = id => $('#' + id, b);
+    const b = $('#sheetRoot'); const g = id => $('#' + id, b); const fb = $('.sheet-body', b).__fb;
     const name = g('fName').value.trim() || 'Quick add';
-    const s = num(g('fSrv').value);
-    if (s <= 0) { toast('Servings must be more than 0'); return; }
+    const s = parseQty(g('fSrv').value) ?? (fb && fb.s);
+    if (!s || s <= 0) { toast('Servings must be more than 0'); return; }
     let serving;
     if (hasGrams) {
       const gm = num(g('fG').value); const hit = ports.find(p => p[1] === gm && p[0] !== '100 g');
       serving = !gm ? 'serving' : hit ? (/\b(g|ml)\b/i.test(hit[0]) ? hit[0] : `${hit[0]} (${fmt(gm)} g)`) : fmt(gm) + ' g';
     }
     else serving = g('fSrvL').value.trim();
+    const bs = fb.base; // per-serving macros; the entry stores these plus `servings` (totals = base x servings)
     const rec = {
-      id: food.id, name, brand: food.brand || '', serving, cal: r0(num(g('fCal').value)), p: num(g('fP').value), c: num(g('fC').value), f: num(g('fF').value),
+      id: food.id, name, brand: food.brand || '', serving, cal: rnd2(bs.cal), p: rnd2(bs.p), c: rnd2(bs.c), f: rnd2(bs.f),
       barcode: (g('fBc').value || '').replace(/\D/g, ''), per100: hasGrams ? f.per100 : null, servingG: hasGrams ? num(g('fG').value) || null : null,
       servingText: food.servingText || '', portions: food.portions || null, src: food.src || '',
     };
@@ -892,7 +905,7 @@ const AI_PROMPT = `Identify each distinct food or drink in the photo and estimat
 Return exactly this JSON shape:
 {"items":[{"name":"string","portion_household":"e.g. 1 cup, 2 slices, 1 medium","portion_grams":number,"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number,"confidence":"low|medium|high"}],"totals":{"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number},"notes":"short string"}
 Rules: numbers are for the whole portion shown (not per 100 g); calories should roughly equal 4*protein + 4*carbs + 9*fat; include cooking fats/sauces you can reasonably infer; split mixed plates into separate items; if the photo has no food return {"items":[],"totals":{"calories":0,"protein_g":0,"carbs_g":0,"fat_g":0},"notes":"no food found"}.`;
-const APP_VERSION = 'v7';
+const APP_VERSION = 'v8';
 const AIT = { first: 60000, retry: 40000, xai: 75000, decode: 15000, ...(window.__AIT || {}) }; // request timeouts (ms)
 class AiErr extends Error { constructor(kind, msg, info = {}) { super(msg); this.kind = kind; this.info = info; } }
 const withTimeout = (p, ms, kind, msg) => new Promise((res, rej) => { const t = setTimeout(() => rej(new AiErr(kind, msg)), ms); p.then(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); }); });
@@ -1074,7 +1087,7 @@ function openAiReview(img, notes, out) {
   const rowHtml = (i, k) => `<div class="aiitem ${i.on ? '' : 'off'}" data-i="${k}">
     <div class="aihead"><span class="switch"><input type="checkbox" class="aiOn" ${i.on ? 'checked' : ''} aria-label="Include ${esc(i.name)}"></span><input class="aiName" value="${esc(i.name)}" aria-label="Name"><span class="conf ${i.conf}">${i.conf}</span></div>
     <input class="aiPort" value="${esc(i.port)}" aria-label="Portion">
-    <div class="aimac">${[['cal', 'kcal'], ['p', 'P g'], ['c', 'C g'], ['f', 'F g']].map(([key, l]) => `<label><input type="text" inputmode="decimal" class="aiM" data-k="${key}" value="${i[key]}"><span>${l}</span></label>`).join('')}</div>
+    <div class="aimac">${[['cal', 'kcal'], ['p', 'P g'], ['c', 'C g'], ['f', 'F g']].map(([key, l]) => `<label><input type="text" inputmode="decimal" class="aiM" data-k="${key}" value="${fmt(i[key] * i.mult)}"><span>${l}</span></label>`).join('')}</div>
     <div class="aimult"><span>Portion ×</span><button class="mini aiMinus" aria-label="Less">−</button><input type="text" inputmode="decimal" class="aiMult" value="${i.mult}"><button class="mini aiPlus" aria-label="More">+</button><span class="aicount"></span></div></div>`;
   const body = `<div class="aireview">
     <div class="airow-top"><img class="aithumb sm" src="${img.url}" alt=""><div class="note warn" style="flex:1"><b>AI estimate — may be off.</b> Check portions and edit anything that looks wrong before logging.${out.notes ? `<br><i>${esc(out.notes)}</i>` : ''}${out.via ? `<br><small>${esc(out.via)}</small>` : ''}</div></div>
@@ -1096,7 +1109,7 @@ function openAiReview(img, notes, out) {
       const upd = () => {
         const t = tots();
         $('#aiTot', b).innerHTML = `<div class="aitotin"><div><b>${r0(t.cal)}</b><small>kcal</small></div><div><b style="color:var(--pro)">${r0(t.p)}g</b><small>protein</small></div><div><b style="color:var(--carb)">${r0(t.c)}g</b><small>carbs</small></div><div><b style="color:var(--fat)">${r0(t.f)}g</b><small>fat</small></div></div>`;
-        $$('.aiitem', b).forEach(el => { const i = items[+el.dataset.i], l = line(i); el.classList.toggle('off', !i.on); $('.aicount', el).textContent = `= ${r0(l.cal)} kcal · P ${r0(l.p)} · C ${r0(l.c)} · F ${r0(l.f)}`; });
+        $$('.aiitem', b).forEach(el => { const i = items[+el.dataset.i], l = line(i); el.classList.toggle('off', !i.on); $('.aicount', el).textContent = `per 1×: ${r0(i.cal)} kcal · P ${r0(i.p)} · C ${r0(i.c)} · F ${r0(i.f)}`; });
         const lbl = st.mode === 'sep' ? `Log ${t.n} item${t.n === 1 ? '' : 's'} · ${r0(t.cal)} kcal` : `Log meal · ${r0(t.cal)} kcal`;
         $('#aiLog', b).textContent = lbl; $('#aiLog', b).disabled = !t.n;
       };
@@ -1105,9 +1118,10 @@ function openAiReview(img, notes, out) {
         $('.aiOn', el).onchange = e => { i.on = e.target.checked; upd(); };
         $('.aiName', el).oninput = e => { i.name = e.target.value; };
         $('.aiPort', el).oninput = e => { i.port = e.target.value; };
-        $$('.aiM', el).forEach(inp => inp.oninput = () => { i[inp.dataset.k] = Math.max(0, num(inp.value)); upd(); });
-        const mi = $('.aiMult', el), setM = v => { i.mult = Math.round(clamp(v, 0.05, 20) * 100) / 100; mi.value = i.mult; upd(); };
-        mi.oninput = () => { const v = num(mi.value); if (v > 0) { i.mult = clamp(v, 0.05, 20); upd(); } };
+        const showM = skip => $$('.aiM', el).forEach(x => { if (x !== skip) x.value = fmt(i[x.dataset.k] * i.mult); }); // fields show totals for the chosen portion ×
+        $$('.aiM', el).forEach(inp => inp.oninput = () => { const v = parseQty(inp.value, true); if (v === null) return; i[inp.dataset.k] = v / i.mult; upd(); });
+        const mi = $('.aiMult', el), setM = v => { i.mult = Math.round(clamp(v, 0.05, 20) * 100) / 100; mi.value = i.mult; showM(); upd(); };
+        mi.oninput = () => { const v = parseQty(mi.value); if (v === null) return; i.mult = clamp(v, 0.05, 20); showM(); upd(); };
         mi.onblur = () => { mi.value = i.mult; };
         $('.aiMinus', el).onclick = () => setM(i.mult - 0.25 < 0.05 ? 0.25 : i.mult - 0.25); $('.aiPlus', el).onclick = () => setM(i.mult + 0.25);
       });

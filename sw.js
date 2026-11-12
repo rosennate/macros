@@ -1,4 +1,4 @@
-const CACHE = 'macros-v7';
+const CACHE = 'macros-v8';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.json',
   'vendor/zxing.min.js', 'data/foods-db.js', 'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 
