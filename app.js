@@ -21,7 +21,7 @@ const longDay = k => parseKey(k).toLocaleDateString(undefined, { weekday: 'long'
 const shortDay = k => parseKey(k).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
 /* ---------- storage ---------- */
-const defaults = () => ({ version: 1, settings: { targets: { cal: 2110, p: 150, c: 220, f: 70 }, calMode: 'auto', theme: 'system', lastExport: null }, foods: {}, entries: {} });
+const defaults = () => ({ version: 1, settings: { targets: { cal: 2110, p: 150, c: 220, f: 70 }, calMode: 'auto', theme: 'system', lastExport: null, exercise: { on: true, pct: 100 } }, foods: {}, entries: {}, burned: {} });
 let data = load();
 function load() {
   try {
@@ -32,7 +32,8 @@ function load() {
 }
 function normalize(d) {
   const base = defaults();
-  const out = { version: 1, settings: { ...base.settings, ...(d.settings || {}) }, foods: d.foods && typeof d.foods === 'object' ? d.foods : {}, entries: d.entries && typeof d.entries === 'object' ? d.entries : {} };
+  const out = { version: 1, settings: { ...base.settings, ...(d.settings || {}) }, foods: d.foods && typeof d.foods === 'object' ? d.foods : {}, entries: d.entries && typeof d.entries === 'object' ? d.entries : {}, burned: d.burned && typeof d.burned === 'object' ? d.burned : {} };
+  out.settings.exercise = { ...base.settings.exercise, ...((d.settings || {}).exercise || {}) };
   out.settings.targets = { ...base.settings.targets, ...((d.settings || {}).targets || {}) };
   return out;
 }
@@ -44,6 +45,12 @@ function save() {
 const S = () => data.settings;
 const autoCal = t => r0(4 * t.p + 4 * t.c + 9 * t.f);
 const targets = () => { const t = S().targets; return { cal: S().calMode === 'auto' ? autoCal(t) : t.cal, p: t.p, c: t.c, f: t.f }; };
+/* Exercise calories (active energy from Apple Watch via Shortcut, or typed in). Stored per day in data.burned; replace-not-add. */
+const burnedOf = k => { const v = num((data.burned || {})[k]); return v > 0 ? v : 0; };
+const exOn = () => !!S().exercise.on;
+const exPct = () => clamp(num(S().exercise.pct) || 100, 0, 100);
+const bonusOf = k => exOn() ? r0(burnedOf(k) * exPct() / 100) : 0;
+const targetsFor = k => { const T = targets(); return { ...T, base: T.cal, bonus: bonusOf(k), cal: T.cal + bonusOf(k) }; };
 const dayEntries = k => (data.entries[k] || []).slice().sort((a, b) => a.ts - b.ts);
 const totalsOf = list => list.reduce((a, e) => { const s = e.servings; a.cal += e.cal * s; a.p += e.p * s; a.c += e.c * s; a.f += e.f * s; return a; }, { cal: 0, p: 0, c: 0, f: 0 });
 
@@ -96,7 +103,7 @@ $('#tabbar').addEventListener('click', e => { const b = e.target.closest('.tab')
 /* ---------- TODAY ---------- */
 function viewToday() {
   const k = ui.day, today = dayKey(), isToday = k === today;
-  const list = dayEntries(k), tot = totalsOf(list), T = targets();
+  const list = dayEntries(k), tot = totalsOf(list), T = targetsFor(k);
   const left = T.cal - tot.cal, overCal = left < 0;
   const dayLabel = isToday ? 'Today' : k === addDays(today, -1) ? 'Yesterday' : longDay(k);
   const lastExport = S().lastExport ? new Date(S().lastExport).getTime() : 0;
@@ -118,10 +125,11 @@ function viewToday() {
   <div class="card summary">
     <div class="hero">
       <div class="ring">${ring(150, 15, tot.cal, T.cal, 'var(--cal)')}<div class="lbl"><div class="big" style="${overCal ? 'color:var(--over)' : ''}">${r0(Math.abs(left)).toLocaleString()}</div><div class="small">kcal ${overCal ? 'over' : 'remaining'}</div></div></div>
-      <div class="herostats"><div><div class="k">Eaten</div><div class="v">${r0(tot.cal).toLocaleString()}</div></div><div><div class="k">Target</div><div class="v">${T.cal.toLocaleString()}</div></div></div>
+      <div class="herostats"><div><div class="k">Eaten</div><div class="v">${r0(tot.cal).toLocaleString()}</div></div><div><div class="k">${T.bonus ? 'Adjusted target' : 'Target'}</div><div class="v">${T.cal.toLocaleString()}</div></div></div>
     </div>
     <div class="macros">${mac('p', 'Protein', 'var(--pro)')}${mac('c', 'Carbs', 'var(--carb)')}${mac('f', 'Fat', 'var(--fat)')}</div>
   </div>
+  ${exerciseCard(k, T)}
   <div class="section-title">Food log</div>
   <div class="card">${list.length ? `<ul class="list">${list.map(e => {
     const s = e.servings;
@@ -131,7 +139,20 @@ function viewToday() {
   }).join('')}</ul>` : `<div class="empty">Nothing logged ${isToday ? 'yet today' : 'this day'}.<br>Tap <b>Add Food</b> to scan a barcode or enter a meal.</div>`}</div>
   </div>`;
 }
+function exerciseCard(k, T) {
+  const b = burnedOf(k), on = exOn(), pct = exPct();
+  if (!on && !b) return `<div class="exlink"><button id="exEdit">Add exercise calories…</button></div>`;
+  return `<div class="card ex">
+    <div class="exrow"><span>Base target</span><b>${T.base.toLocaleString()}</b></div>
+    <div class="exrow"><span>Exercise<small>${b ? (on ? `${pct}% of ${r0(b).toLocaleString()} kcal active energy` : `${r0(b).toLocaleString()} kcal burned — not counted (off in Settings)`) : 'None recorded for this day'}</small></span><b class="${T.bonus ? 'plus' : ''}">${T.bonus ? '+' + T.bonus.toLocaleString() : '0'}</b></div>
+    <div class="exrow total"><span>Adjusted target</span><b>${T.cal.toLocaleString()}</b></div>
+    <div class="exbtns"><button id="exEdit">${b ? 'Edit burned' : 'Enter burned'}</button><button id="exPaste">Paste from Shortcut</button><button id="exHelp" aria-label="Setup help">Help</button></div>
+  </div>`;
+}
 function bindToday() {
+  $('#exEdit')?.addEventListener('click', () => openBurned(ui.day));
+  $('#exPaste')?.addEventListener('click', () => openBurned(ui.day, true));
+  $('#exHelp')?.addEventListener('click', openHelp);
   $('#prev').onclick = () => { ui.day = addDays(ui.day, -1); render(); };
   $('#next').onclick = () => { ui.day = addDays(ui.day, 1); render(); };
   $('#totoday')?.addEventListener('click', () => { ui.day = dayKey(); render(); });
@@ -647,30 +668,34 @@ document.addEventListener('visibilitychange', () => {
 /* ---------- HISTORY ---------- */
 function viewHistory() {
   const n = ui.histRange, today = dayKey(), T = targets();
+  const TF = k => targetsFor(k).cal;
   const days = Array.from({ length: n }, (_, i) => addDays(today, i - n + 1));
-  const rows = days.map(k => ({ k, e: dayEntries(k) })).map(r => ({ ...r, t: totalsOf(r.e) }));
+  const rows = days.map(k => ({ k, e: dayEntries(k), tc: TF(k), bonus: bonusOf(k) })).map(r => ({ ...r, t: totalsOf(r.e) }));
+  const anyBonus = rows.some(r => r.bonus > 0);
   const logged = rows.filter(r => r.e.length);
   const avg = key => logged.length ? logged.reduce((a, r) => a + r.t[key], 0) / logged.length : 0;
-  const maxV = Math.max(T.cal * 1.15, ...rows.map(r => r.t.cal), 1);
+  const maxV = Math.max(...rows.map(r => r.tc * 1.15), ...rows.map(r => r.t.cal), 1);
   const goalPct = T.cal / maxV * 100;
+  const avgT = logged.length ? r0(logged.reduce((a, r) => a + r.tc, 0) / logged.length) : T.cal;
   const labelEvery = n === 7 ? 1 : 5;
   return `<div class="page"><h1 class="title">History</h1>
   <div class="seg" id="range" style="margin-bottom:14px"><button data-r="7" class="${n === 7 ? 'on' : ''}">7 Days</button><button data-r="30" class="${n === 30 ? 'on' : ''}">30 Days</button></div>
   <div class="card"><div class="avgs">
-    <div><div class="n">${r0(avg('cal'))}</div><div class="l">kcal</div><div class="t">${logged.length ? `of ${T.cal}` : '—'}</div></div>
+    <div><div class="n">${r0(avg('cal'))}</div><div class="l">kcal</div><div class="t">${logged.length ? `of ${avgT}` : '—'}</div></div>
     <div><div class="n" style="color:var(--pro)">${r0(avg('p'))}g</div><div class="l">Protein</div><div class="t">of ${T.p}g</div></div>
     <div><div class="n" style="color:var(--carb)">${r0(avg('c'))}g</div><div class="l">Carbs</div><div class="t">of ${T.c}g</div></div>
     <div><div class="n" style="color:var(--fat)">${r0(avg('f'))}g</div><div class="l">Fat</div><div class="t">of ${T.f}g</div></div></div>
     <div class="foot" style="margin:-4px 16px 12px;text-align:center">Daily average across ${logged.length} logged day${logged.length === 1 ? '' : 's'} of ${n}</div></div>
   <div class="section-title">Calories per day</div>
   <div class="card chart"><div class="bars">
-    ${rows.map(r => `<button class="b" data-day="${r.k}" aria-label="${shortDay(r.k)}: ${r0(r.t.cal)} kcal"><i class="${!r.e.length ? 'none' : r.t.cal > T.cal ? 'over' : ''}" style="height:${(r.t.cal / maxV * 100).toFixed(1)}%"></i></button>`).join('')}
-    <div class="goal" style="bottom:${goalPct}%"><span>${T.cal}</span></div></div>
+    ${rows.map(r => `<button class="b" data-day="${r.k}" aria-label="${shortDay(r.k)}: ${r0(r.t.cal)} kcal"><i class="${!r.e.length ? 'none' : r.t.cal > r.tc ? 'over' : ''}" style="height:${(r.t.cal / maxV * 100).toFixed(1)}%"></i>${anyBonus ? `<u class="gt" style="bottom:${(r.tc / maxV * 100).toFixed(1)}%"></u>` : ''}</button>`).join('')}
+    ${anyBonus ? '' : `<div class="goal" style="bottom:${goalPct}%"><span>${T.cal}</span></div>`}</div>
     <div class="xlabels">${rows.map((r, i) => `<span>${(rows.length - 1 - i) % labelEvery === 0 ? (n === 7 ? parseKey(r.k).toLocaleDateString(undefined, { weekday: 'narrow' }) : parseKey(r.k).getDate()) : ''}</span>`).join('')}</div></div>
+  ${anyBonus ? '<div class="foot" style="margin:6px 16px 0">Dashes mark each day’s adjusted target (base + exercise).</div>' : ''}
   <div class="section-title">Days</div>
   <div class="card"><ul class="list">${rows.slice().reverse().map(r => `<li><button class="row" data-day="${r.k}"><div class="grow"><div class="nm">${r.k === today ? 'Today' : shortDay(r.k)} <span class="sub">${r.k === today ? '' : longDay(r.k)}</span></div>
-    <div class="meta">${r.e.length ? `P ${r0(r.t.p)} · C ${r0(r.t.c)} · F ${r0(r.t.f)}` : 'Nothing logged'}</div></div>
-    <div class="kcal" style="${r.t.cal > T.cal ? 'color:var(--over)' : ''}">${r.e.length ? r0(r.t.cal) : '—'}<small>${r.e.length ? 'kcal' : ''}</small></div></button></li>`).join('')}</ul></div></div>`;
+    <div class="meta">${r.e.length ? `P ${r0(r.t.p)} · C ${r0(r.t.c)} · F ${r0(r.t.f)}` : 'Nothing logged'}${r.bonus ? ` · target ${r.tc} (+${r.bonus} ex.)` : ''}</div></div>
+    <div class="kcal" style="${r.t.cal > r.tc ? 'color:var(--over)' : ''}">${r.e.length ? r0(r.t.cal) : '—'}<small>${r.e.length ? 'kcal' : ''}</small></div></button></li>`).join('')}</ul></div></div>`;
 }
 function bindHistory() {
   $$('#range button').forEach(b => b.onclick = () => { ui.histRange = +b.dataset.r; render(); });
@@ -689,6 +714,12 @@ function viewSettings() {
     ${row('tCal', 'Calories', auto ? autoCal(t) : t.cal, 'var(--cal)', 'kcal', auto)}</div>
   <div class="card" style="margin-top:12px"><div class="field" style="padding:8px 16px"><div class="seg" id="calMode" style="flex:1"><button data-m="auto" class="${auto ? 'on' : ''}">Auto (4/4/9)</button><button data-m="manual" class="${auto ? '' : 'on'}">Enter manually</button></div></div></div>
   <div class="foot">${auto ? 'Calories = 4 × protein + 4 × carbs + 9 × fat.' : 'Calories are set independently of your macro grams.'}</div>
+  <div class="section-title">Exercise calories</div>
+  <div class="card"><div class="field"><label for="exOn">Add exercise calories to target</label><span class="switch"><input type="checkbox" id="exOn" ${exOn() ? 'checked' : ''}></span></div>
+    <div class="field"><span>Active energy only</span><span class="unit">Resting excluded</span></div>
+    <div class="field" style="padding:8px 16px"><span style="flex:none">Count</span><div class="seg" id="exPct" style="flex:1;margin-left:12px">${[50, 75, 100].map(x => `<button data-p="${x}" class="${exPct() === x ? 'on' : ''}">${x}%</button>`).join('')}</div></div></div>
+  <div class="foot">Your daily target goes up by this share of the active calories burned that day. Watch estimates tend to run high, so 50–75% is a common, safer choice. Resting energy is never added — your base target already covers it.</div>
+  <div class="stack" style="margin-top:12px"><button class="btn secondary" id="exHelpS">Apple Watch / Shortcut setup…</button></div>
   <div class="section-title">Appearance</div>
   <div class="card"><div class="field" style="padding:8px 16px"><div class="seg" id="theme" style="flex:1">${['system', 'light', 'dark'].map(x => `<button data-t="${x}" class="${S().theme === x ? 'on' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}</div></div></div>
   <div class="section-title">Backup</div>
@@ -703,6 +734,9 @@ function bindSettings() {
   const upd = () => { const t = S().targets; $('#tCal').value = S().calMode === 'auto' ? autoCal(t) : t.cal; };
   [['tP', 'p'], ['tC', 'c'], ['tF', 'f'], ['tCal', 'cal']].forEach(([id, k]) => $('#' + id).addEventListener('input', e => { S().targets[k] = Math.max(0, num(e.target.value)); save(); if (k !== 'cal') upd(); }));
   $$('#calMode button').forEach(b => b.onclick = () => { S().calMode = b.dataset.m; if (b.dataset.m === 'manual') S().targets.cal = autoCal(S().targets); save(); render(); });
+  $('#exOn').onchange = e => { S().exercise.on = e.target.checked; save(); render(); };
+  $$('#exPct button').forEach(b => b.onclick = () => { S().exercise.pct = +b.dataset.p; save(); render(); });
+  $('#exHelpS').onclick = openHelp;
   $$('#theme button').forEach(b => b.onclick = () => { S().theme = b.dataset.t; save(); applyTheme(); render(); });
   $('#exp').onclick = () => exportData().then(ok => ok && render());
   $('#imp').onclick = () => $('#impFile').click();
@@ -710,10 +744,88 @@ function bindSettings() {
   $('#wipe').onclick = () => { if (confirm('Delete ALL entries, foods and settings from this device? This cannot be undone.') && confirm('Really delete everything? Export a backup first if unsure.')) { data = defaults(); save(); applyTheme(); ui.day = dayKey(); render(); toast('All data deleted'); } };
 }
 
+/* ---------- exercise calories: import / edit / help ---------- */
+const validKey = k => /^\d{4}-\d{2}-\d{2}$/.test(k) && dayKey(parseKey(k)) === k;
+// Accepts: "macros-burned:<kcal>[:<YYYY-MM-DD>]", a URL containing ?burned=<kcal>&date=<YYYY-MM-DD>, or a bare number (= today).
+function parseBurned(text) {
+  text = String(text || '').trim(); let kcal = null, date = null, m;
+  if ((m = text.match(/macros-burned:\s*(\d+(?:[.,]\d+)?)(?:\s*[:\s]\s*(\d{4}-\d{2}-\d{2}))?/i))) { kcal = num(m[1]); date = m[2] || null; }
+  else if ((m = text.match(/[?&#]burned=(\d+(?:[.,]\d+)?)/i))) { kcal = num(m[1]); const d = text.match(/[?&#]date=(\d{4}-\d{2}-\d{2})/i); date = d ? d[1] : null; }
+  else if ((m = text.match(/^(\d+(?:[.,]\d+)?)\s*(?:kcal|cal)?$/i))) kcal = num(m[1]);
+  if (kcal === null) return null;
+  date = date || dayKey();
+  if (!validKey(date) || date > dayKey() || kcal > 20000) return null;
+  return { kcal: r0(kcal), date };
+}
+function setBurned(date, kcal) { // replace (not add) so running the Shortcut repeatedly is idempotent
+  if (kcal > 0) data.burned[date] = r0(kcal); else delete data.burned[date];
+  save();
+}
+function applyBurned(p, via) {
+  setBurned(p.date, p.kcal); if (p.date <= dayKey()) ui.day = p.date;
+  ui.tab = 'today'; render();
+  toast(`${p.kcal} kcal burned saved for ${p.date === dayKey() ? 'today' : shortDay(p.date)}${exOn() ? '' : ' (exercise is off in Settings)'}`);
+}
+function openBurned(day, autoPaste) {
+  const cur = burnedOf(day);
+  sheet({
+    title: 'Calories burned', left: { label: 'Cancel' }, right: { label: 'Save', fn: () => {
+      const v = $('#bKcal').value.trim();
+      if (v === '') { setBurned(day, 0); } else { const n = num(v); if (n < 0 || n > 20000) { toast('Enter 0–20,000 kcal'); return; } setBurned(day, n); }
+      closeSheet(); render(); toast('Saved');
+    } },
+    body: `<div class="stack" style="margin-top:10px"><div class="note">${day === dayKey() ? 'Today' : shortDay(day)} — active energy burned. Saving replaces the value for this day (it never adds up). Leave blank to clear.</div>
+      <div class="card"><div class="field"><label for="bKcal">Active calories</label><input type="text" inputmode="numeric" id="bKcal" value="${cur ? r0(cur) : ''}" placeholder="0" autocomplete="off"><span class="unit">kcal</span></div></div>
+      <button class="btn secondary" id="bPaste">Paste from Shortcut</button>
+      <div id="bFall" class="hidden stack"><div class="note warn">Couldn’t read the clipboard automatically. Long-press below, tap Paste, then tap Import.</div>
+        <div class="card"><div class="field"><textarea id="bTxt" rows="2" placeholder="macros-burned:482:${dayKey()}" style="width:100%;background:none;border:0;outline:0;font-size:16px;padding:12px 0;resize:none"></textarea></div></div>
+        <button class="btn" id="bImp">Import</button></div>
+      <div class="foot" style="text-align:center"><button id="bHelp" style="color:var(--accent)">How do I set up the Apple Watch Shortcut?</button></div></div>`,
+    mount: b => {
+      const fromText = t => { const p = parseBurned(t); if (!p) { toast('No burned-calories value found in that text'); return false; } closeSheet(); applyBurned(p); return true; };
+      const doPaste = async () => {
+        try { const t = await navigator.clipboard.readText(); if (!fromText(t) && !parseBurned(t)) $('#bFall', b).classList.remove('hidden'); }
+        catch (e) { $('#bFall', b).classList.remove('hidden'); $('#bTxt', b).focus(); }
+      };
+      $('#bPaste', b).onclick = doPaste;
+      $('#bImp', b).onclick = () => fromText($('#bTxt', b).value);
+      $('#bHelp', b).onclick = openHelp;
+      if (autoPaste) $('#bFall', b).classList.remove('hidden'); // iOS needs a tap for clipboard access; make the manual path visible too
+    },
+  });
+}
+const SHORTCUT_STEPS = [
+  ['Create the shortcut', 'Open the <b>Shortcuts</b> app → tap <b>+</b> (top right) → name it <b>Macros Burned</b>.'],
+  ['Action 1: Find Health Samples', 'Tap <b>Add Action</b>, search <b>Find Health Samples</b>. Add filters: <b>Type</b> is <b>Active Energy</b>, and <b>Start Date</b> is <b>Today</b>. Turn <b>Limit</b> off. (On older iOS this action is called “Get Health Sample”.)'],
+  ['Action 2: Calculate Statistics', 'Add <b>Calculate Statistics</b>. Set the operation to <b>Sum</b> and its input to <b>Health Samples</b>. If Shortcuts complains about the input type, insert <b>Get Details of Health Samples</b> (detail: <b>Value</b>) before this step and sum that instead.'],
+  ['Action 3: Round Number', 'Add <b>Round Number</b> → input <b>Statistics</b>, round to <b>Ones Place</b>.'],
+  ['Action 4: Format Date', 'Add <b>Format Date</b> → Date: <b>Current Date</b>, Date Format: <b>Custom</b>, format string <code>yyyy-MM-dd</code>.'],
+  ['Action 5: Text', 'Add <b>Text</b> and type exactly: <code>macros-burned:</code> then tap the <b>Rounded Number</b> variable, type <code>:</code>, then tap the <b>Formatted Date</b> variable. Result looks like <code>macros-burned:482:' + '2026-11-11</code>.'],
+  ['Action 6: Copy to Clipboard', 'Add <b>Copy to Clipboard</b> → input <b>Text</b>.'],
+  ['Action 7: Show Notification', 'Add <b>Show Notification</b>: “Burned kcal copied — open Macros and tap Paste from Shortcut”. (Optional but a good reminder.)'],
+  ['Allow Health access', 'Tap ▶ to run it once. When iOS asks for Health access to <b>Active Energy</b>, tap <b>Allow</b> (and <b>Always Allow</b> for automations).'],
+  ['Hand off to this app', 'Open <b>Macros</b> from your Home Screen → Today → <b>Paste from Shortcut</b> → tap the <b>Paste</b> bubble iOS shows. Your calories-burned for today are replaced and the target updates. Running it again later in the day just replaces the number.'],
+];
+function helpHtml() {
+  return `<div class="help"><div class="note"><b>Why not a link?</b> A Shortcut’s “Open URL” opens Safari, and iOS keeps Safari’s storage separate from this Home Screen app, so a link can’t write into it. Instead the Shortcut puts the number on the clipboard and you paste it here with one tap.</div>
+  <h3>One-time setup (≈3 min)</h3><ol>${SHORTCUT_STEPS.map(([t, d]) => `<li><b>${t}.</b> ${d}</li>`).join('')}</ol>
+  <h3>Run it automatically</h3><ol>
+   <li>Shortcuts → <b>Automation</b> → <b>+</b> → <b>Time of Day</b> → e.g. <b>8:00 PM</b>, Daily → <b>Next</b> → <b>Run Shortcut</b> → <b>Macros Burned</b> → Next → set <b>Run Immediately</b> → Done.</li>
+   <li>The shortcut copies your burned calories at 8 PM and shows a notification. Open Macros and tap <b>Paste from Shortcut</b>. (The clipboard keeps the value until you copy something else.)</li>
+   <li>Want it any time? Add <b>Macros Burned</b> to your Home Screen or Lock Screen widget / Action Button, run it, then paste in Macros.</li></ol>
+  <h3>Good to know</h3><ul>
+   <li>Only <b>Active Energy</b> is used — resting energy is already inside your base target.</li>
+   <li>Pasting <i>replaces</i> that day’s value; it never double-counts.</li>
+   <li>You can also type calories burned by hand (Today → Enter burned).</li>
+   <li>Accepted paste formats: <code>macros-burned:482:YYYY-MM-DD</code>, <code>macros-burned:482</code> (today), or just <code>482</code>.</li>
+   <li>If you open <code>…/macros/?burned=482&amp;date=YYYY-MM-DD</code> in a Safari tab, the numbers are saved in <i>Safari’s</i> copy of the app only — not the Home Screen app.</li></ul></div>`;
+}
+function openHelp() { sheet({ title: 'Apple Watch setup', left: { label: 'Close' }, body: helpHtml() }); }
+
 /* ---------- export / import ---------- */
 async function exportData() {
   const stamp = new Date().toISOString();
-  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries }, null, 2);
+  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries, burned: data.burned }, null, 2);
   const name = `macro-tracker-backup-${dayKey()}.json`;
   const file = new File([payload], name, { type: 'application/json' });
   try {
@@ -738,6 +850,7 @@ function importText(text) {
       $('#mg', b).onclick = () => {
         Object.entries(inc.entries).forEach(([k, arr]) => { if (!Array.isArray(arr)) return; const cur = data.entries[k] = data.entries[k] || []; const ids = new Set(cur.map(e => e.id)); arr.forEach(e => { if (!ids.has(e.id)) cur.push(e); }); });
         Object.entries(inc.foods).forEach(([id, f]) => { if (!data.foods[id] && !(f.barcode && localByBarcode(f.barcode))) data.foods[id] = f; });
+        Object.entries(inc.burned).forEach(([k, v]) => { if (!(k in data.burned)) data.burned[k] = v; });
         save(); closeSheet(); render(); toast('Merged backup');
       };
       $('#rp', b).onclick = () => { if (!confirm('Replace all current data with this backup?')) return; data = inc; save(); applyTheme(); closeSheet(); render(); toast('Backup restored'); };
@@ -747,6 +860,14 @@ function importText(text) {
 
 /* ---------- boot ---------- */
 applyTheme(); render();
+(() => { // ?burned=<kcal>&date=YYYY-MM-DD (date optional). Applies, then strips the params so a reload doesn't re-run it.
+  const q = new URLSearchParams(location.search);
+  if (!q.has('burned')) return;
+  const p = parseBurned(`?burned=${q.get('burned')}${q.get('date') ? '&date=' + q.get('date') : ''}`);
+  q.delete('burned'); q.delete('date');
+  try { history.replaceState(null, '', location.pathname + (q.toString() ? '?' + q : '') + location.hash); } catch (e) { }
+  if (p) applyBurned(p); else toast('Couldn’t read that burned-calories link');
+})();
 const markBadge = () => { if (document.querySelector('a[href*="deed.page"]')) document.documentElement.classList.add('badged'); };
 markBadge(); window.addEventListener('load', markBadge);
 try { navigator.storage?.persist?.(); } catch (e) { }
