@@ -54,6 +54,13 @@ const targetsFor = k => { const T = targets(); return { ...T, base: T.cal, bonus
 const dayEntries = k => (data.entries[k] || []).slice().sort((a, b) => a.ts - b.ts);
 const totalsOf = list => list.reduce((a, e) => { const s = e.servings; a.cal += e.cal * s; a.p += e.p * s; a.c += e.c * s; a.f += e.f * s; return a; }, { cal: 0, p: 0, c: 0, f: 0 });
 
+/* xAI settings live under their own localStorage key (not inside the main data object). */
+const XKEY = 'macrotracker.xai';
+const XAI_URL = 'https://api.x.ai/v1';
+const XAI_MODELS = [['grok-4.7', 'Grok 4.7 — recommended'], ['grok-4.6', 'Grok 4.6'], ['grok-4.5', 'Grok 4.5'], ['grok-4.3', 'Grok 4.3 (cheaper)']];
+const xai = (() => { const d = { key: '', model: 'grok-4.7', inBackup: false }; try { return { ...d, ...JSON.parse(localStorage.getItem(XKEY) || '{}') }; } catch (e) { return d; } })();
+const xaiSave = () => { try { localStorage.setItem(XKEY, JSON.stringify(xai)); } catch (e) { toast('Could not save — storage is full or blocked'); } };
+
 /* ---------- state / ui helpers ---------- */
 const ui = { addQ: '', tab: 'today', day: dayKey(), lastToday: dayKey(), histRange: 7, histScroll: 0 };
 let toastTimer;
@@ -316,11 +323,16 @@ function openAdd() {
   sheet({
     title: `Add to ${ui.day === dayKey() ? 'Today' : shortDay(ui.day)}`, left: { label: 'Close' },
     body: `<div class="btn-row" style="margin-top:6px"><button class="btn" id="scanBtn">📷 Scan Barcode</button><button class="btn gray" id="manBtn">Enter Manually</button></div>
+      <button class="btn secondary" id="photoBtn" style="margin-top:10px">✨ Photo — AI estimate</button>
+      <input type="file" id="photoIn" accept="image/*" class="hidden"><input type="file" id="photoCam" accept="image/*" capture="environment" class="hidden">
       <div class="card" style="margin-top:12px"><div class="field"><input type="search" id="q" placeholder="Search foods — chicken breast, rice, banana…" style="text-align:left" autocomplete="off" autocapitalize="none" spellcheck="false" enterkeyhint="search"></div></div>
       <div id="foods">${foodList()}</div>
       <div class="card" style="margin-top:16px"><div class="field"><label for="bcIn">Barcode</label><input type="text" id="bcIn" inputmode="numeric" placeholder="Type UPC / EAN digits" autocomplete="off"><button id="bcGo" class="mini" style="width:auto;padding:0 12px;border-radius:17px;font-size:15px;font-weight:600">Look up</button></div></div>`,
     mount: b => {
       $('#scanBtn', b).onclick = startScan;
+      $('#photoBtn', b).onclick = () => $('#photoIn', b).click(); // no `capture`: iOS offers Take Photo / Photo Library / Files
+      $('#photoIn', b).onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) startPhoto(f); };
+      $('#photoCam', b).onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) startPhoto(f); };
       $('#manBtn', b).onclick = () => openFood({ mode: 'new', food: { name: '', cal: 0, p: 0, c: 0, f: 0 } });
       const go = () => { const c = $('#bcIn', b).value.trim(); if (!c) return; handleBarcode(c); };
       $('#bcGo', b).onclick = go; $('#bcIn', b).onkeydown = e => { if (e.key === 'Enter') go(); };
@@ -720,6 +732,13 @@ function viewSettings() {
     <div class="field" style="padding:8px 16px"><span style="flex:none">Count</span><div class="seg" id="exPct" style="flex:1;margin-left:12px">${[50, 75, 100].map(x => `<button data-p="${x}" class="${exPct() === x ? 'on' : ''}">${x}%</button>`).join('')}</div></div></div>
   <div class="foot">Your daily target goes up by this share of the active calories burned that day. Watch estimates tend to run high, so 50–75% is a common, safer choice. Resting energy is never added — your base target already covers it.</div>
   <div class="stack" style="margin-top:12px"><button class="btn secondary" id="exHelpS">Apple Watch / Shortcut setup…</button></div>
+  <div class="section-title">AI photo estimates (xAI Grok)</div>
+  <div class="card"><div class="field"><label for="xKey">xAI API key</label><input type="password" id="xKey" value="${esc(xai.key)}" placeholder="xai-…" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+    <div class="field"><label for="xModel">Model</label><select id="xModel">${XAI_MODELS.map(([v, l]) => `<option value="${v}" ${xai.model === v ? 'selected' : ''}>${l}</option>`).join('')}${XAI_MODELS.some(m => m[0] === xai.model) ? '' : `<option selected value="${esc(xai.model)}">${esc(xai.model)}</option>`}</select></div>
+    <div class="field"><label for="xBk">Include key in backup file</label><span class="switch"><input type="checkbox" id="xBk" ${xai.inBackup ? 'checked' : ''}></span></div></div>
+  <div class="btn-row" style="margin-top:10px"><button class="btn secondary" id="xTest">Test key</button><button class="btn danger" id="xClear">Clear key</button></div>
+  <div class="foot" id="xStatus">${xai.key ? 'Key saved on this device only.' : 'No key yet — add one to use the Photo button.'}</div>
+  <div class="foot">Your key is stored only in this app’s on-device storage and sent only to api.x.ai. Photos you analyze are sent to xAI. <button id="xHelp" style="color:var(--accent)">How to get a key…</button></div>
   <div class="section-title">Appearance</div>
   <div class="card"><div class="field" style="padding:8px 16px"><div class="seg" id="theme" style="flex:1">${['system', 'light', 'dark'].map(x => `<button data-t="${x}" class="${S().theme === x ? 'on' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}</div></div></div>
   <div class="section-title">Backup</div>
@@ -737,11 +756,25 @@ function bindSettings() {
   $('#exOn').onchange = e => { S().exercise.on = e.target.checked; save(); render(); };
   $$('#exPct button').forEach(b => b.onclick = () => { S().exercise.pct = +b.dataset.p; save(); render(); });
   $('#exHelpS').onclick = openHelp;
+  $('#xKey').addEventListener('input', e => { xai.key = e.target.value.trim(); xaiSave(); $('#xStatus').textContent = xai.key ? 'Key saved on this device only.' : 'No key yet — add one to use the Photo button.'; });
+  $('#xModel').onchange = e => { xai.model = e.target.value; xaiSave(); };
+  $('#xBk').onchange = e => { xai.inBackup = e.target.checked; xaiSave(); };
+  $('#xClear').onclick = () => { xai.key = ''; xaiSave(); $('#xKey').value = ''; $('#xStatus').textContent = 'Key cleared.'; };
+  $('#xHelp').onclick = openAiHelp;
+  $('#xTest').onclick = async () => {
+    const st = $('#xStatus'); if (!xai.key) { st.textContent = 'Enter a key first.'; return; }
+    st.textContent = 'Testing…';
+    try {
+      const r = await fetch(XAI_URL + '/models', { headers: { Authorization: 'Bearer ' + xai.key } });
+      if (r.ok) { const j = await r.json().catch(() => ({})); const ids = (j.data || []).map(m => m.id); st.textContent = '✓ Key works.' + (ids.length && !ids.includes(xai.model) ? ` Note: “${xai.model}” isn’t in this key’s model list.` : ''); }
+      else { const t = await r.text().catch(() => ''); st.textContent = /api key/i.test(t) || r.status === 401 ? '✗ xAI rejected this key. Check it was copied in full.' : `✗ xAI answered ${r.status}.`; }
+    } catch (e) { st.textContent = '✗ Couldn’t reach xAI — check your connection.'; }
+  };
   $$('#theme button').forEach(b => b.onclick = () => { S().theme = b.dataset.t; save(); applyTheme(); render(); });
   $('#exp').onclick = () => exportData().then(ok => ok && render());
   $('#imp').onclick = () => $('#impFile').click();
   $('#impFile').onchange = e => { const f = e.target.files[0]; if (f) f.text().then(importText).catch(() => toast('Could not read that file')); e.target.value = ''; };
-  $('#wipe').onclick = () => { if (confirm('Delete ALL entries, foods and settings from this device? This cannot be undone.') && confirm('Really delete everything? Export a backup first if unsure.')) { data = defaults(); save(); applyTheme(); ui.day = dayKey(); render(); toast('All data deleted'); } };
+  $('#wipe').onclick = () => { if (confirm('Delete ALL entries, foods and settings from this device? This cannot be undone.') && confirm('Really delete everything? Export a backup first if unsure.')) { data = defaults(); xai.key = ''; xai.model = 'grok-4.7'; xai.inBackup = false; xaiSave(); save(); applyTheme(); ui.day = dayKey(); render(); toast('All data deleted'); } };
 }
 
 /* ---------- exercise calories: import / edit / help ---------- */
@@ -822,10 +855,175 @@ function helpHtml() {
 }
 function openHelp() { sheet({ title: 'Apple Watch setup', left: { label: 'Close' }, body: helpHtml() }); }
 
+/* ---------- AI photo estimate (xAI Grok vision) ---------- */
+const AI_SYS = 'You are a careful nutrition estimator. You look at a photo of a meal and estimate what is on the plate. Reply with ONLY one JSON object, no prose, no markdown fences.';
+const AI_PROMPT = `Identify each distinct food or drink in the photo and estimate the portion actually shown.
+Return exactly this JSON shape:
+{"items":[{"name":"string","portion_household":"e.g. 1 cup, 2 slices, 1 medium","portion_grams":number,"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number,"confidence":"low|medium|high"}],"totals":{"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number},"notes":"short string"}
+Rules: numbers are for the whole portion shown (not per 100 g); calories should roughly equal 4*protein + 4*carbs + 9*fat; include cooking fats/sauces you can reasonably infer; split mixed plates into separate items; if the photo has no food return {"items":[],"totals":{"calories":0,"protein_g":0,"carbs_g":0,"fat_g":0},"notes":"no food found"}.`;
+class AiErr extends Error { constructor(kind, msg) { super(msg); this.kind = kind; } }
+function downscale(file, max = 1024) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight)), w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h; const cx = cv.getContext('2d');
+      cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h); cx.drawImage(img, 0, 0, w, h); URL.revokeObjectURL(url);
+      res({ url: cv.toDataURL('image/jpeg', 0.82), w, h });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new AiErr('image', 'That image couldn’t be opened. Try a JPEG or PNG photo.')); };
+    img.src = url;
+  });
+}
+async function xaiPost(body, signal) {
+  let r;
+  try { r = await fetch(XAI_URL + '/chat/completions', { method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + xai.key }, body: JSON.stringify(body) }); }
+  catch (e) { if (e && e.name === 'AbortError') throw e; throw new AiErr('network', 'Couldn’t reach xAI. Check your connection and try again.'); }
+  if (r.ok) return r.json();
+  const t = await r.text().catch(() => ''); let m = ''; try { const j = JSON.parse(t); m = j.error?.message || j.error || j.message || ''; } catch (e) { m = t; }
+  m = String(m || '').slice(0, 300);
+  if (r.status === 401 || /api key/i.test(m)) throw new AiErr('badkey', 'xAI rejected your API key. Check it in Settings (copy the whole key from console.x.ai).');
+  if (r.status === 403) throw new AiErr('forbidden', 'xAI refused the request (403). The key may lack access or the account may be out of credits.' + (m ? ' — ' + m : ''));
+  if (r.status === 429) throw new AiErr('rate', 'xAI says you’re sending too many requests or are out of credits (429). Wait a moment and retry.');
+  if (r.status >= 500) throw new AiErr('server', `xAI had a problem (${r.status}). Try again in a minute.`);
+  throw new AiErr('http' + r.status, `xAI couldn’t process this request (${r.status}).${m ? ' ' + m : ''}`);
+}
+function parseMealJson(text) {
+  let t = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim(), j;
+  try { j = JSON.parse(t); } catch (e) { const a = t.indexOf('{'), b = t.lastIndexOf('}'); if (a >= 0 && b > a) { try { j = JSON.parse(t.slice(a, b + 1)); } catch (e2) { } } }
+  if (!j || !Array.isArray(j.items)) throw new AiErr('parse', 'Couldn’t read the model’s answer (it wasn’t valid JSON).');
+  const n = v => { const x = num(v); return x > 0 && x < 1e5 ? x : 0; };
+  const items = j.items.filter(i => i && typeof i === 'object').map(i => {
+    const g = n(i.portion_grams), hh = String(i.portion_household || '').trim();
+    let conf = i.confidence; if (typeof conf === 'number') conf = conf >= .75 ? 'high' : conf >= .45 ? 'medium' : 'low'; conf = /^(low|medium|high)$/i.test(conf) ? conf.toLowerCase() : 'medium';
+    return { on: true, name: String(i.name || 'Food').trim().slice(0, 80) || 'Food', port: [hh, g ? `${r0(g)} g` : ''].filter(Boolean).join(' · ') || '1 serving', cal: r0(n(i.calories)), p: Math.round(n(i.protein_g) * 10) / 10, c: Math.round(n(i.carbs_g) * 10) / 10, f: Math.round(n(i.fat_g) * 10) / 10, conf, mult: 1 };
+  });
+  return { items, notes: String(j.notes || '').slice(0, 300) };
+}
+async function estimateMeal(dataUrl, notes, signal) {
+  if (!xai.key) throw new AiErr('nokey', 'Add your xAI API key in Settings first.');
+  if (navigator.onLine === false) throw new AiErr('offline', 'You’re offline. Photo estimates need an internet connection.');
+  const text = AI_PROMPT + (notes ? `\nUser notes about this meal (trust these): ${notes}` : '');
+  const body = { model: xai.model, stream: false, max_completion_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }, { type: 'text', text }] }] };
+  if (/^grok-4\.[567]/.test(xai.model)) body.reasoning_effort = 'low';
+  let res;
+  try { res = await xaiPost(body, signal); }
+  catch (e) { // optional params can be rejected by some models: retry once without them
+    if (e instanceof AiErr && /^http400$/.test(e.kind)) { delete body.response_format; delete body.reasoning_effort; res = await xaiPost(body, signal); } else throw e;
+  }
+  const msg = res?.choices?.[0]?.message?.content;
+  const out = parseMealJson(Array.isArray(msg) ? msg.map(x => x.text || '').join('') : msg);
+  out.model = res.model || xai.model; return out;
+}
+let aiCtl = null;
+function startPhoto(file) {
+  if (!xai.key) {
+    sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">Add your xAI API key to use photo estimates. It stays on this device.</div>
+      <button class="btn" id="aiToSet">Open Settings</button><button class="btn secondary" id="aiHelp0">How do I get a key?</button></div>`,
+      mount: b => { $('#aiToSet', b).onclick = () => { closeSheet(); ui.tab = 'settings'; render(); }; $('#aiHelp0', b).onclick = openAiHelp; } });
+    return;
+  }
+  sheet({ title: 'Photo estimate', left: { label: 'Cancel' }, body: `<div class="aiwait"><div class="spin"></div><div>Preparing photo…</div></div>` });
+  downscale(file).then(img => openPhotoPrep(img, ''), e => aiError(e, null));
+}
+function openPhotoPrep(img, notes) {
+  sheet({ title: 'Photo estimate', left: { label: 'Cancel' }, body: `<div class="stack" style="margin-top:10px">
+    <img class="aithumb" src="${img.url}" alt="Meal photo">
+    <div class="card"><div class="field"><input type="text" id="aiNotes" placeholder="Notes (optional) — e.g. cooked in olive oil" value="${esc(notes)}" style="text-align:left" autocomplete="off" enterkeyhint="go"></div></div>
+    <button class="btn" id="aiGo">Estimate calories &amp; macros</button>
+    <div class="foot" style="text-align:center">Sent to xAI (${esc(xai.model)}) at ${img.w}×${img.h}. Estimates can be off — you’ll review before logging.</div></div>`,
+    mount: b => { const go = () => runEstimate(img, $('#aiNotes', b).value.trim()); $('#aiGo', b).onclick = go; $('#aiNotes', b).onkeydown = e => { if (e.key === 'Enter') go(); }; } });
+}
+async function runEstimate(img, notes) {
+  aiCtl?.abort(); const ctl = aiCtl = new AbortController();
+  sheet({ title: 'Photo estimate', left: { label: 'Cancel', fn: () => { ctl.abort(); closeSheet(); } }, body: `<div class="aiwait"><div class="spin"></div><div>Asking Grok to look at your meal…</div><small>Usually 5–30 seconds</small></div>` });
+  const to = setTimeout(() => ctl.abort('timeout'), 90000);
+  try { const out = await estimateMeal(img.url, notes, ctl.signal); clearTimeout(to); if (!sheetOpen || ctl.signal.aborted) return; openAiReview(img, notes, out); }
+  catch (e) { clearTimeout(to); if (e && e.name === 'AbortError') { if (ctl.signal.reason === 'timeout' && sheetOpen) aiError(new AiErr('timeout', 'xAI took too long to answer. Try again.'), () => runEstimate(img, notes), img, notes); return; } if (sheetOpen) aiError(e, () => runEstimate(img, notes), img, notes); }
+}
+function aiError(e, retry, img, notes) {
+  const kind = e instanceof AiErr ? e.kind : 'unknown', msg = e instanceof AiErr ? e.message : 'Something went wrong. Try again.';
+  const needKey = kind === 'badkey' || kind === 'nokey';
+  sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">${esc(msg)}</div>
+    ${needKey ? '<button class="btn" id="aiToSet">Open Settings</button><button class="btn secondary" id="aiH">How to get a key</button>' : (retry ? '<button class="btn" id="aiRetry">Try again</button>' : '')}
+    ${img ? '<button class="btn gray" id="aiBack">Edit notes / photo</button>' : ''}<button class="btn gray" id="aiManual">Enter food manually</button></div>`,
+    mount: b => {
+      $('#aiToSet', b)?.addEventListener('click', () => { closeSheet(); ui.tab = 'settings'; render(); }); $('#aiH', b)?.addEventListener('click', openAiHelp);
+      $('#aiRetry', b)?.addEventListener('click', retry); $('#aiBack', b)?.addEventListener('click', () => openPhotoPrep(img, notes));
+      $('#aiManual', b).onclick = () => openFood({ mode: 'new', food: { name: '', cal: 0, p: 0, c: 0, f: 0 }, back: openAdd });
+    } });
+}
+function openAiReview(img, notes, out) {
+  const items = out.items;
+  if (!items.length) { aiError(new AiErr('empty', 'Grok didn’t see any food in that photo' + (out.notes ? ` (“${out.notes}”)` : '') + '. Try a closer, brighter shot.'), null, img, notes); return; }
+  const st = { mode: 'sep', meal: '' };
+  const line = i => ({ cal: i.cal * i.mult, p: i.p * i.mult, c: i.c * i.mult, f: i.f * i.mult });
+  const tots = () => items.filter(i => i.on).reduce((a, i) => { const l = line(i); a.cal += l.cal; a.p += l.p; a.c += l.c; a.f += l.f; a.n++; return a; }, { cal: 0, p: 0, c: 0, f: 0, n: 0 });
+  const rowHtml = (i, k) => `<div class="aiitem ${i.on ? '' : 'off'}" data-i="${k}">
+    <div class="aihead"><span class="switch"><input type="checkbox" class="aiOn" ${i.on ? 'checked' : ''} aria-label="Include ${esc(i.name)}"></span><input class="aiName" value="${esc(i.name)}" aria-label="Name"><span class="conf ${i.conf}">${i.conf}</span></div>
+    <input class="aiPort" value="${esc(i.port)}" aria-label="Portion">
+    <div class="aimac">${[['cal', 'kcal'], ['p', 'P g'], ['c', 'C g'], ['f', 'F g']].map(([key, l]) => `<label><input type="text" inputmode="decimal" class="aiM" data-k="${key}" value="${i[key]}"><span>${l}</span></label>`).join('')}</div>
+    <div class="aimult"><span>Portion ×</span><button class="mini aiMinus" aria-label="Less">−</button><input type="text" inputmode="decimal" class="aiMult" value="${i.mult}"><button class="mini aiPlus" aria-label="More">+</button><span class="aicount"></span></div></div>`;
+  const body = `<div class="aireview">
+    <div class="airow-top"><img class="aithumb sm" src="${img.url}" alt=""><div class="note warn" style="flex:1"><b>AI estimate — may be off.</b> Check portions and edit anything that looks wrong before logging.${out.notes ? `<br><i>${esc(out.notes)}</i>` : ''}</div></div>
+    <div class="aitot card" id="aiTot"></div>
+    <div id="aiItems">${items.map(rowHtml).join('')}</div>
+    <div class="seg" id="aiMode" style="margin:14px 0 8px"><button data-m="sep" class="on">Separate entries</button><button data-m="one">One combined meal</button></div>
+    <div class="card hidden" id="aiMealWrap"><div class="field"><label for="aiMeal">Meal name</label><input type="text" id="aiMeal" placeholder="Photo meal" autocomplete="off"></div></div>
+    <button class="btn" id="aiLog" style="margin-top:12px">Log</button>
+    <button class="btn gray" id="aiRe" style="margin-top:10px">Re-run with different notes</button></div>`;
+  const doLog = () => {
+    const on = items.filter(i => i.on); if (!on.length) { toast('Turn on at least one item'); return; }
+    const arr = data.entries[ui.day] = data.entries[ui.day] || [], ts = Date.now();
+    if (st.mode === 'sep') on.forEach((i, k) => arr.push({ id: uid(), name: i.name.trim() || 'Food', serving: i.port.trim() || '1 serving', servings: i.mult, cal: i.cal, p: i.p, c: i.c, f: i.f, barcode: '', foodId: '', g: null, ai: true, ts: ts + k }));
+    else { const t = tots(); const nm = ($('#aiMeal').value.trim()) || ('Photo meal: ' + on.map(i => i.name.trim()).join(', ')).slice(0, 80); arr.push({ id: uid(), name: nm, serving: `${on.length} item${on.length > 1 ? 's' : ''} (AI estimate)`, servings: 1, cal: r0(t.cal), p: Math.round(t.p * 10) / 10, c: Math.round(t.c * 10) / 10, f: Math.round(t.f * 10) / 10, barcode: '', foodId: '', g: null, ai: true, ts }); }
+    save(); closeSheet(); render(); toast(`Logged ${st.mode === 'sep' ? on.length + ' item' + (on.length > 1 ? 's' : '') : 'meal'} · ${r0(tots().cal)} kcal`);
+  };
+  sheet({ title: 'Review estimate', left: { label: 'Back', fn: () => openPhotoPrep(img, notes) }, right: { label: 'Log', fn: doLog }, body,
+    mount: b => {
+      const upd = () => {
+        const t = tots();
+        $('#aiTot', b).innerHTML = `<div class="aitotin"><div><b>${r0(t.cal)}</b><small>kcal</small></div><div><b style="color:var(--pro)">${r0(t.p)}g</b><small>protein</small></div><div><b style="color:var(--carb)">${r0(t.c)}g</b><small>carbs</small></div><div><b style="color:var(--fat)">${r0(t.f)}g</b><small>fat</small></div></div>`;
+        $$('.aiitem', b).forEach(el => { const i = items[+el.dataset.i], l = line(i); el.classList.toggle('off', !i.on); $('.aicount', el).textContent = `= ${r0(l.cal)} kcal · P ${r0(l.p)} · C ${r0(l.c)} · F ${r0(l.f)}`; });
+        const lbl = st.mode === 'sep' ? `Log ${t.n} item${t.n === 1 ? '' : 's'} · ${r0(t.cal)} kcal` : `Log meal · ${r0(t.cal)} kcal`;
+        $('#aiLog', b).textContent = lbl; $('#aiLog', b).disabled = !t.n;
+      };
+      $$('.aiitem', b).forEach(el => {
+        const i = items[+el.dataset.i];
+        $('.aiOn', el).onchange = e => { i.on = e.target.checked; upd(); };
+        $('.aiName', el).oninput = e => { i.name = e.target.value; };
+        $('.aiPort', el).oninput = e => { i.port = e.target.value; };
+        $$('.aiM', el).forEach(inp => inp.oninput = () => { i[inp.dataset.k] = Math.max(0, num(inp.value)); upd(); });
+        const mi = $('.aiMult', el), setM = v => { i.mult = Math.round(clamp(v, 0.05, 20) * 100) / 100; mi.value = i.mult; upd(); };
+        mi.oninput = () => { const v = num(mi.value); if (v > 0) { i.mult = clamp(v, 0.05, 20); upd(); } };
+        mi.onblur = () => { mi.value = i.mult; };
+        $('.aiMinus', el).onclick = () => setM(i.mult - 0.25 < 0.05 ? 0.25 : i.mult - 0.25); $('.aiPlus', el).onclick = () => setM(i.mult + 0.25);
+      });
+      $$('#aiMode button', b).forEach(x => x.onclick = () => { st.mode = x.dataset.m; $$('#aiMode button', b).forEach(y => y.classList.toggle('on', y === x)); $('#aiMealWrap', b).classList.toggle('hidden', st.mode !== 'one'); upd(); });
+      $('#aiLog', b).onclick = doLog; $('#aiRe', b).onclick = () => openPhotoPrep(img, notes);
+      upd();
+    } });
+}
+function openAiHelp() {
+  sheet({ title: 'AI photo setup', left: { label: 'Close' }, body: `<div class="help"><div class="note">Take or choose a photo of a meal and Grok (xAI’s vision model) estimates calories and macros. You review and edit the result before anything is logged. It’s an estimate — portions and hidden oils are hard to see.</div>
+  <h3>Get an xAI API key</h3><ol>
+   <li>On any browser go to <b>console.x.ai</b> and sign in (or create an account).</li>
+   <li>Add credit / a payment method under <b>Billing</b> if the console asks — API use is pay-as-you-go (a photo estimate costs a small fraction of a cent to a few cents).</li>
+   <li>Open <b>API Keys</b> → <b>Create API key</b>. Copy the key (starts with <code>xai-</code>) — it’s shown only once.</li>
+   <li>Here: <b>Settings → AI photo estimates → xAI API key</b>, paste it, tap <b>Test key</b>.</li>
+   <li>Leave the model on <b>Grok 4.7</b> (recommended) unless you want a cheaper one.</li></ol>
+  <h3>Use it</h3><ol><li>Today → <b>Add Food</b> → <b>Photo — AI estimate</b> → Take Photo or Photo Library.</li>
+   <li>Optionally add notes (“cooked in olive oil”, “half portion”) → <b>Estimate</b>.</li>
+   <li>Review: switch items off, edit names/numbers, change <b>Portion ×</b>, and choose separate entries or one combined meal → <b>Log</b>.</li></ol>
+  <h3>Privacy &amp; cost</h3><ul><li>The key is stored only in this app’s on-device storage and sent only to api.x.ai. It is left out of backup files unless you switch on “Include key in backup file”.</li>
+   <li>The photo (downscaled to ~1024 px) and your notes are sent to xAI for each estimate. Nothing else is sent.</li>
+   <li>Anyone who can unlock this phone and open the app could see the key in Settings — use a key with a spend limit.</li></ul></div>` });
+}
+
 /* ---------- export / import ---------- */
 async function exportData() {
   const stamp = new Date().toISOString();
-  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries, burned: data.burned }, null, 2);
+  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries, burned: data.burned, ...(xai.inBackup && xai.key ? { xai: { key: xai.key, model: xai.model } } : {}) }, null, 2);
   const name = `macro-tracker-backup-${dayKey()}.json`;
   const file = new File([payload], name, { type: 'application/json' });
   try {
@@ -840,6 +1038,7 @@ function importText(text) {
   let j; try { j = JSON.parse(text); } catch (e) { toast('That file isn’t valid JSON'); return; }
   if (!j || typeof j !== 'object' || typeof j.entries !== 'object' || j.entries === null) { toast('That doesn’t look like a Macro Tracker backup'); return; }
   const inc = normalize(j);
+  if (j.xai && typeof j.xai.key === 'string' && j.xai.key && !xai.key) { xai.key = j.xai.key; if (typeof j.xai.model === 'string') xai.model = j.xai.model; xaiSave(); }
   const nE = Object.values(inc.entries).reduce((n, a) => n + (Array.isArray(a) ? a.length : 0), 0);
   sheet({
     title: 'Import Backup', left: { label: 'Cancel' },

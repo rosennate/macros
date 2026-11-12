@@ -214,3 +214,28 @@ a { color: var(--accent); }
 .help ol, .help ul { padding-left: 22px; margin: 6px 0; } .help li { margin: 7px 0; }
 .help code { background: var(--card2); border-radius: 5px; padding: 1px 5px; font-size: 13px; word-break: break-all; }
 .hidden { display: none !important; }
+
+/* AI photo */
+.aithumb { display: block; width: 100%; max-height: 260px; object-fit: cover; border-radius: 14px; }
+.aithumb.sm { width: 74px; height: 74px; flex: none; border-radius: 10px; }
+.airow-top { display: flex; gap: 10px; align-items: flex-start; margin: 8px 0 12px; }
+.aiwait { text-align: center; padding: 48px 20px; color: var(--muted); display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.aiwait small { font-size: 13px; }
+.spin { width: 34px; height: 34px; border-radius: 50%; border: 3px solid var(--track); border-top-color: var(--accent); animation: sp 0.9s linear infinite; }
+@keyframes sp { to { transform: rotate(360deg); } }
+.aitot { margin-bottom: 12px; } .aitotin { display: grid; grid-template-columns: repeat(4, 1fr); text-align: center; padding: 12px 4px; }
+.aitotin b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; } .aitotin small { color: var(--muted); font-size: 12px; }
+.aiitem { background: var(--card); border-radius: 14px; padding: 10px 12px 12px; margin-bottom: 10px; box-shadow: var(--shadow); }
+.aiitem.off { opacity: .45; }
+.aihead { display: flex; align-items: center; gap: 10px; }
+.aihead .aiName { flex: 1; min-width: 0; font-size: 17px; font-weight: 600; border: 0; background: none; outline: 0; padding: 6px 0; }
+.conf { font-size: 11px; text-transform: uppercase; letter-spacing: .3px; font-weight: 700; padding: 3px 7px; border-radius: 8px; flex: none; }
+.conf.high { background: rgba(48,209,88,.18); color: #1f9d46; } .conf.medium { background: rgba(255,159,10,.18); color: #b25e00; } .conf.low { background: rgba(255,59,48,.16); color: var(--danger); }
+.aiPort { width: 100%; border: 0; background: none; outline: 0; color: var(--muted); font-size: 15px; padding: 4px 0 8px; }
+.aimac { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.aimac label { display: block; text-align: center; }
+.aimac input { width: 100%; text-align: center; background: var(--card2); border: 0; border-radius: 9px; padding: 8px 2px; font-size: 16px; outline: 0; font-variant-numeric: tabular-nums; }
+.aimac span { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+.aimult { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+.aimult .aiMult { width: 56px; text-align: center; background: var(--card2); border: 0; border-radius: 9px; padding: 7px 2px; font-size: 16px; outline: 0; color: var(--text); }
+.aimult .aicount { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
