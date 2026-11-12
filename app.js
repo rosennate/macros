@@ -23,6 +23,14 @@ const addDays = (k, n) => { const d = parseKey(k); d.setDate(d.getDate() + n); r
 const longDay = k => parseKey(k).toLocaleDateString(undefined, { weekday: 'long' });
 const shortDay = k => parseKey(k).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
+/* ---------- meals ---------- */
+const MEALS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snacks']];
+const MEAL_SHORT = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner', snack: 'Snack' };
+const isMeal = m => MEALS.some(x => x[0] === m);
+// before 10:30 breakfast, 10:30-15:00 lunch, 15:00-17:00 snack, 17:00-21:00 dinner, otherwise snack
+function mealGuess(ts = Date.now()) { const d = new Date(ts), m = d.getHours() * 60 + d.getMinutes(); return m < 630 ? 'breakfast' : m < 900 ? 'lunch' : m < 1020 ? 'snack' : m < 1260 ? 'dinner' : 'snack'; }
+let migratedMeals = 0;
+
 /* ---------- storage ---------- */
 const defaults = () => ({ version: 1, settings: { targets: { cal: 2110, p: 150, c: 220, f: 70 }, calMode: 'auto', theme: 'system', lastExport: null, exercise: { on: true, pct: 100 } }, foods: {}, entries: {}, burned: {} });
 let data = load();
@@ -38,6 +46,8 @@ function normalize(d) {
   const out = { version: 1, settings: { ...base.settings, ...(d.settings || {}) }, foods: d.foods && typeof d.foods === 'object' ? d.foods : {}, entries: d.entries && typeof d.entries === 'object' ? d.entries : {}, burned: d.burned && typeof d.burned === 'object' ? d.burned : {} };
   out.settings.exercise = { ...base.settings.exercise, ...((d.settings || {}).exercise || {}) };
   out.settings.targets = { ...base.settings.targets, ...((d.settings || {}).targets || {}) };
+  // Older data/backups have no `meal`: assign one from the logged time (non-destructive; every other field is untouched).
+  Object.values(out.entries).forEach(arr => { if (Array.isArray(arr)) arr.forEach(e => { if (e && typeof e === 'object' && !isMeal(e.meal)) { e.meal = mealGuess(num(e.ts) || Date.now()); migratedMeals++; } }); });
   return out;
 }
 let saveFailed = false;
@@ -46,6 +56,7 @@ function save() {
   catch (e) { if (!saveFailed) toast('Could not save — storage is full or blocked'); saveFailed = true; }
 }
 const S = () => data.settings;
+if (migratedMeals) save(); // persist the one-time meal migration
 const autoCal = t => r0(4 * t.p + 4 * t.c + 9 * t.f);
 const targets = () => { const t = S().targets; return { cal: S().calMode === 'auto' ? autoCal(t) : t.cal, p: t.p, c: t.c, f: t.f }; };
 /* Exercise calories (active energy from Apple Watch via Shortcut, or typed in). Stored per day in data.burned; replace-not-add. */
@@ -54,25 +65,34 @@ const exOn = () => !!S().exercise.on;
 const exPct = () => clamp(num(S().exercise.pct) || 100, 0, 100);
 const bonusOf = k => exOn() ? r0(burnedOf(k) * exPct() / 100) : 0;
 const targetsFor = k => { const T = targets(); return { ...T, base: T.cal, bonus: bonusOf(k), cal: T.cal + bonusOf(k) }; };
+const mealOf = e => isMeal(e.meal) ? e.meal : mealGuess(e.ts);
+const curMeal = () => isMeal(ui.meal) ? ui.meal : mealGuess();
+const mealSeg = (id, sel) => `<div class="seg mealseg" id="${id}">${MEALS.map(([k, l]) => `<button type="button" data-meal="${k}" class="${k === sel ? 'on' : ''}">${l === 'Snacks' ? 'Snack' : l}</button>`).join('')}</div>`;
 const dayEntries = k => (data.entries[k] || []).slice().sort((a, b) => a.ts - b.ts);
 const totalsOf = list => list.reduce((a, e) => { const s = e.servings; a.cal += e.cal * s; a.p += e.p * s; a.c += e.c * s; a.f += e.f * s; return a; }, { cal: 0, p: 0, c: 0, f: 0 });
 
-/* xAI settings live under their own localStorage key (not inside the main data object). */
+/* AI photo settings (Google Gemini only). Stored under their own localStorage key (not inside the main data object);
+   the key name is historical. Legacy xAI fields from earlier versions are stripped on load. */
 const XKEY = 'macrotracker.xai';
-const XAI_URL = 'https://api.x.ai/v1';
-const XAI_MODELS = [['grok-4.7', 'Grok 4.7 — recommended'], ['grok-4.6', 'Grok 4.6'], ['grok-4.5', 'Grok 4.5'], ['grok-4.3', 'Grok 4.3 (cheaper)']];
 const GEM_URL = 'https://generativelanguage.googleapis.com/v1beta';
 const GEM_MODELS = [['gemini-3.8-flash', 'Gemini 3.8 Flash — recommended'], ['gemini-3.6-flash', 'Gemini 3.6 Flash'], ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash-Lite (lightest)']];
-const PV = { xai: { name: 'xAI Grok', host: 'api.x.ai' }, gemini: { name: 'Google Gemini', host: 'generativelanguage.googleapis.com' } };
-const xai = (() => { const d = { key: '', model: 'grok-4.7', gKey: '', gModel: 'gemini-3.8-flash', provider: '', inBackup: false }; try { return { ...d, ...JSON.parse(localStorage.getItem(XKEY) || '{}') }; } catch (e) { return d; } })();
-const aiKey = pv => pv === 'gemini' ? xai.gKey : xai.key;
-const aiModel = pv => pv === 'gemini' ? xai.gModel : xai.model;
-// Provider in use: the one picked, unless it has no key and the other does. With no explicit pick, Gemini wins only if it's the only key set.
-const aiProv = () => { const want = xai.provider === 'gemini' || xai.provider === 'xai' ? xai.provider : (xai.gKey && !xai.key ? 'gemini' : 'xai'); const other = want === 'xai' ? 'gemini' : 'xai'; return !aiKey(want) && aiKey(other) ? other : want; };
-const xaiSave = () => { try { localStorage.setItem(XKEY, JSON.stringify(xai)); } catch (e) { toast('Could not save — storage is full or blocked'); } };
+const PV = { gemini: { name: 'Google Gemini', host: 'generativelanguage.googleapis.com' } };
+const gai = (() => {
+  const d = { gKey: '', gModel: 'gemini-3.8-flash', inBackup: false };
+  try {
+    const raw = JSON.parse(localStorage.getItem(XKEY) || '{}'), o = { ...d };
+    ['gKey', 'gModel'].forEach(k => { if (typeof raw[k] === 'string' && raw[k]) o[k] = raw[k]; }); o.inBackup = !!raw.inBackup;
+    if ('key' in raw || 'model' in raw || 'provider' in raw) localStorage.setItem(XKEY, JSON.stringify(o)); // silently drop the old xAI key/model/provider
+    return o;
+  } catch (e) { return d; }
+})();
+const aiKey = () => gai.gKey;
+const aiModel = () => gai.gModel;
+const aiProv = () => 'gemini';
+const gaiSave = () => { try { localStorage.setItem(XKEY, JSON.stringify(gai)); } catch (e) { toast('Could not save — storage is full or blocked'); } };
 
 /* ---------- state / ui helpers ---------- */
-const ui = { addQ: '', tab: 'today', day: dayKey(), lastToday: dayKey(), histRange: 7, histScroll: 0 };
+const ui = { meal: null, addQ: '', tab: 'today', day: dayKey(), lastToday: dayKey(), histRange: 7, histScroll: 0 };
 let toastTimer;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200); }
 
@@ -111,7 +131,7 @@ function render() {
   $('.fab')?.remove();
   if (ui.tab === 'today') {
     document.body.insertAdjacentHTML('beforeend', `<button class="fab" id="fab" aria-label="Add food">${ICON.plus}<span>Add Food</span></button>`);
-    $('#fab').onclick = () => { ui.addQ = ''; openAdd(); };
+    $('#fab').onclick = () => { ui.addQ = ''; ui.meal = null; openAdd(); };
   }
   if (ui.tab === 'today') bindToday(); else if (ui.tab === 'history') bindHistory(); else bindSettings();
 }
@@ -147,14 +167,18 @@ function viewToday() {
     <div class="macros">${mac('p', 'Protein', 'var(--pro)')}${mac('c', 'Carbs', 'var(--carb)')}${mac('f', 'Fat', 'var(--fat)')}</div>
   </div>
   ${exerciseCard(k, T)}
-  <div class="section-title">Food log</div>
-  <div class="card">${list.length ? `<ul class="list">${list.map(e => {
-    const s = e.servings;
-    return `<li><button class="row entry" data-id="${e.id}"><div class="grow"><div class="nm">${esc(e.name)}</div>
+  ${MEALS.map(([mk, ml]) => {
+    const L = list.filter(e => mealOf(e) === mk), t = totalsOf(L);
+    return `<div class="mealhead"><div class="mh-t">${ml}</div><div class="mh-s">${L.length ? `${r0(t.cal)} kcal · P ${r0(t.p)} · C ${r0(t.c)} · F ${r0(t.f)}` : ''}</div>${L.length ? `<button class="mh-add" data-addmeal="${mk}" aria-label="Add to ${ml}">+</button>` : ''}</div>
+    ${L.length ? `<div class="card"><ul class="list">${L.map(entryRow).join('')}</ul></div>` : `<button class="mealempty" data-addmeal="${mk}">+ Add</button>`}`;
+  }).join('')}
+  </div>`;
+}
+function entryRow(e) {
+  const s = e.servings;
+  return `<li><button class="row entry" data-id="${e.id}"><div class="grow"><div class="nm">${esc(e.name)}</div>
       <div class="meta">${e.barcode ? ICON.barcode : ''}${rnd2(s)} × ${esc(e.serving || 'serving')} · P ${r0(e.p * s)} · C ${r0(e.c * s)} · F ${r0(e.f * s)}</div></div>
       <div class="kcal">${r0(e.cal * s)}<small>kcal</small></div></button></li>`;
-  }).join('')}</ul>` : `<div class="empty">Nothing logged ${isToday ? 'yet today' : 'this day'}.<br>Tap <b>Add Food</b> to scan a barcode or enter a meal.</div>`}</div>
-  </div>`;
 }
 function exerciseCard(k, T) {
   const b = burnedOf(k), on = exOn(), pct = exPct();
@@ -176,6 +200,7 @@ function bindToday() {
   $('#pick').onchange = e => { if (e.target.value) { ui.day = e.target.value > dayKey() ? dayKey() : e.target.value; render(); } };
   $('#bk')?.addEventListener('click', () => exportData().then(ok => { if (ok) render(); }));
   $$('.entry').forEach(b => b.onclick = () => openEntry(b.dataset.id));
+  $$('[data-addmeal]').forEach(b => b.onclick = () => { ui.addQ = ''; ui.meal = b.dataset.addmeal; openAdd(); });
 }
 
 /* ---------- sheets ---------- */
@@ -330,15 +355,17 @@ async function offSearch(q, after) {
 }
 
 function openAdd() {
+  ui.meal = curMeal(); // freeze the time-of-day guess for this add session
   sheet({
     title: `Add to ${ui.day === dayKey() ? 'Today' : shortDay(ui.day)}`, left: { label: 'Close' },
-    body: `<div class="btn-row" style="margin-top:6px"><button class="btn" id="scanBtn">📷 Scan Barcode</button><button class="btn gray" id="manBtn">Enter Manually</button></div>
+    body: `${mealSeg('addMeal', ui.meal)}<div class="btn-row" style="margin-top:10px"><button class="btn" id="scanBtn">📷 Scan Barcode</button><button class="btn gray" id="manBtn">Enter Manually</button></div>
       <button class="btn secondary" id="photoBtn" style="margin-top:10px">✨ Photo — AI estimate</button>
       <input type="file" id="photoIn" accept="image/*" class="hidden"><input type="file" id="photoCam" accept="image/*" capture="environment" class="hidden">
       <div class="card" style="margin-top:12px"><div class="field"><input type="search" id="q" placeholder="Search foods — chicken breast, rice, banana…" style="text-align:left" autocomplete="off" autocapitalize="none" spellcheck="false" enterkeyhint="search"></div></div>
       <div id="foods">${foodList()}</div>
       <div class="card" style="margin-top:16px"><div class="field"><label for="bcIn">Barcode</label><input type="text" id="bcIn" inputmode="numeric" placeholder="Type UPC / EAN digits" autocomplete="off"><button id="bcGo" class="mini" style="width:auto;padding:0 12px;border-radius:17px;font-size:15px;font-weight:600">Look up</button></div></div>`,
     mount: b => {
+      $$('#addMeal button', b).forEach(x => x.onclick = () => { ui.meal = x.dataset.meal; $$('#addMeal button', b).forEach(y => y.classList.toggle('on', y === x)); });
       $('#scanBtn', b).onclick = startScan;
       $('#photoBtn', b).onclick = () => $('#photoIn', b).click(); // no `capture`: iOS offers Take Photo / Photo Library / Files
       $('#photoIn', b).onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) startPhoto(f); };
@@ -393,9 +420,9 @@ function upsertFood(f, extra = {}) {
   unsaved.slice(300).forEach(x => { if (!x.barcode) delete data.foods[x.id]; });
   return rec;
 }
-function logFood(food, servings, day) {
+function logFood(food, servings, day, meal = curMeal()) {
   const rec = upsertFood(food); rec.uses++; rec.lastUsed = Date.now();
-  (data.entries[day] = data.entries[day] || []).push({ id: uid(), name: rec.name, serving: rec.serving, servings, cal: rec.cal, p: rec.p, c: rec.c, f: rec.f, barcode: rec.barcode || '', foodId: rec.id, g: rec.servingG || null, ts: Date.now() });
+  (data.entries[day] = data.entries[day] || []).push({ id: uid(), name: rec.name, serving: rec.serving, servings, cal: rec.cal, p: rec.p, c: rec.c, f: rec.f, barcode: rec.barcode || '', foodId: rec.id, g: rec.servingG || null, meal: isMeal(meal) ? meal : curMeal(), ts: Date.now() });
   save();
 }
 
@@ -423,6 +450,7 @@ function openFood({ mode, food, servings = 1, entry, note, noteWarn, back }) {
   sheet({
     title, left: back ? { label: 'Back', fn: back } : { label: 'Cancel' }, right: { label: saveLabel, fn: submit },
     body: `<div class="stack" style="margin-top:6px">${noteHtml}
+      <div class="card"><div class="field" style="padding:8px 16px"><div style="flex:1">${mealSeg('fMeal', mode === 'edit' && entry ? mealOf(entry) : curMeal())}</div></div></div>
       <div class="card">
         <div class="field"><label for="fName">Name</label><input type="text" id="fName" value="${esc(f.name)}" placeholder="e.g. Chicken bowl" autocomplete="off" autocapitalize="words"></div>
         <div class="field"><label for="fBc">Barcode</label><input type="text" inputmode="numeric" id="fBc" value="${esc(f.barcode || '')}" placeholder="Optional — remembers this food" autocomplete="off"></div>
@@ -466,6 +494,7 @@ function openFood({ mode, food, servings = 1, entry, note, noteWarn, back }) {
         const gm = parseQty(g('fG').value); if (gm === null) return; const p = f.per100; syncPort(gm);
         base.cal = p.cal * gm / 100; base.p = p.p * gm / 100; base.c = p.c * gm / 100; base.f = p.f * gm / 100; calTouched = true; showFields(); updatePv();
       });
+      $$('#fMeal button', b).forEach(x => x.onclick = () => { $$('#fMeal button', b).forEach(y => y.classList.toggle('on', y === x)); });
       g('fSrv').dataset.base = '1'; b.__fb = { base, get s() { return curS; } };
       updatePv();
       if (mode === 'edit') g('del').onclick = () => {
@@ -489,6 +518,7 @@ function openFood({ mode, food, servings = 1, entry, note, noteWarn, back }) {
       serving = !gm ? 'serving' : hit ? (/\b(g|ml)\b/i.test(hit[0]) ? hit[0] : `${hit[0]} (${fmt(gm)} g)`) : fmt(gm) + ' g';
     }
     else serving = g('fSrvL').value.trim();
+    const meal = ($('#fMeal .on', b) || {}).dataset?.meal || curMeal();
     const bs = fb.base; // per-serving macros; the entry stores these plus `servings` (totals = base x servings)
     const rec = {
       id: food.id, name, brand: food.brand || '', serving, cal: rnd2(bs.cal), p: rnd2(bs.p), c: rnd2(bs.c), f: rnd2(bs.f),
@@ -497,11 +527,11 @@ function openFood({ mode, food, servings = 1, entry, note, noteWarn, back }) {
     };
     const fav = g('fFav').checked;
     if (mode === 'edit') {
-      Object.assign(entry, { name, serving, servings: s, cal: rec.cal, p: rec.p, c: rec.c, f: rec.f, barcode: rec.barcode });
+      Object.assign(entry, { name, serving, servings: s, cal: rec.cal, p: rec.p, c: rec.c, f: rec.f, barcode: rec.barcode, meal });
       if (fav || data.foods[entry.foodId]?.saved) { const fr = upsertFood({ ...rec, id: entry.foodId }, { saved: fav }); entry.foodId = fr.id; }
       save(); toast('Saved');
     } else {
-      logFood(rec, s, ui.day);
+      logFood(rec, s, ui.day, meal);
       if (fav) { const fr = upsertFood(rec, { saved: true }); }
       save(); toast(`Added ${name}`);
     }
@@ -736,14 +766,11 @@ function bindHistory() {
 
 /* ---------- SETTINGS ---------- */
 function pvNote() {
-  const v = aiProv(), picked = xai.provider === 'gemini' || xai.provider === 'xai' ? xai.provider : null;
-  if (!aiKey('xai') && !aiKey('gemini')) return 'No key yet — add one below to use the Photo button.';
-  return `Photo estimates use <b>${PV[v].name}</b>${picked && picked !== v ? ` (${PV[picked].name} has no key yet)` : !picked && v === 'gemini' ? ' (the only key you’ve added)' : ''}.`;
+  return aiKey() ? 'Photo estimates use <b>Google Gemini</b>.' : 'No key yet — add a free Gemini key below to use the Photo button.';
 }
 function provBlock(v) {
-  const g = v === 'gemini', list = g ? GEM_MODELS : XAI_MODELS, cur = aiModel(v), key = aiKey(v);
-  return `<div class="section-title" style="margin-top:14px">${PV[v].name}${g ? ' <span style="text-transform:none;letter-spacing:0">— free tier available</span>' : ''}</div>
-  <div class="card"><div class="field"><label for="${v}Key">API key</label><input type="password" id="${v}Key" value="${esc(key)}" placeholder="${g ? 'AIza…' : 'xai-…'}" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+  const list = GEM_MODELS, cur = aiModel(v), key = aiKey(v);
+  return `<div class="card"><div class="field"><label for="${v}Key">API key</label><input type="password" id="${v}Key" value="${esc(key)}" placeholder="AIza…" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
     <div class="field"><label for="${v}Model">Model</label><select id="${v}Model">${list.map(([m, l]) => `<option value="${m}" ${cur === m ? 'selected' : ''}>${l}</option>`).join('')}${list.some(m => m[0] === cur) ? '' : `<option selected value="${esc(cur)}">${esc(cur)}</option>`}</select></div></div>
   <div class="btn-row" style="margin-top:8px"><button class="btn secondary" id="${v}Test">Test key</button><button class="btn danger" id="${v}Clear">Clear key</button></div>
   <div class="foot" id="${v}Status">${key ? 'Key saved on this device only.' : 'No key yet.'}</div>`;
@@ -765,12 +792,11 @@ function viewSettings() {
     <div class="field" style="padding:8px 16px"><span style="flex:none">Count</span><div class="seg" id="exPct" style="flex:1;margin-left:12px">${[50, 75, 100].map(x => `<button data-p="${x}" class="${exPct() === x ? 'on' : ''}">${x}%</button>`).join('')}</div></div></div>
   <div class="foot">Your daily target goes up by this share of the active calories burned that day. Watch estimates tend to run high, so 50–75% is a common, safer choice. Resting energy is never added — your base target already covers it.</div>
   <div class="stack" style="margin-top:12px"><button class="btn secondary" id="exHelpS">Apple Watch / Shortcut setup…</button></div>
-  <div class="section-title">AI photo estimates</div>
-  <div class="card"><div class="field" style="padding:8px 16px"><div class="seg" id="aiProv" style="flex:1">${['xai', 'gemini'].map(v => `<button data-pv="${v}" class="${aiProv() === v ? 'on' : ''}">${PV[v].name}</button>`).join('')}</div></div></div>
-  <div class="foot" id="pvNote">${pvNote()}</div>
-  ${provBlock('xai')}${provBlock('gemini')}
-  <div class="card" style="margin-top:12px"><div class="field"><label for="xBk">Include keys in backup file</label><span class="switch"><input type="checkbox" id="xBk" ${xai.inBackup ? 'checked' : ''}></span></div></div>
-  <div class="foot">Keys are stored only in this app’s on-device storage (never in the data backup unless the switch above is on) and sent only to the provider they belong to. Photos you analyze are sent to that provider. <button id="xHelp" style="color:var(--accent)">How to get a key…</button></div>
+  <div class="section-title">AI photo estimates (Google Gemini — free tier available)</div>
+  <div class="foot" id="pvNote" style="margin-top:0">${pvNote()}</div>
+  ${provBlock('gemini')}
+  <div class="card" style="margin-top:12px"><div class="field"><label for="xBk">Include key in backup file</label><span class="switch"><input type="checkbox" id="xBk" ${gai.inBackup ? 'checked' : ''}></span></div></div>
+  <div class="foot">Your key is stored only in this app’s on-device storage (never in the data backup unless the switch above is on) and sent only to Google. Photos you analyze are sent to Google Gemini; on the free tier Google may use them to improve its products. <button id="xHelp" style="color:var(--accent)">How to get a key…</button></div>
   <div class="foot" style="text-align:center">App version ${APP_VERSION}</div>
     <div class="section-title">Appearance</div>
   <div class="card"><div class="field" style="padding:8px 16px"><div class="seg" id="theme" style="flex:1">${['system', 'light', 'dark'].map(x => `<button data-t="${x}" class="${S().theme === x ? 'on' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}</div></div></div>
@@ -789,36 +815,34 @@ function bindSettings() {
   $('#exOn').onchange = e => { S().exercise.on = e.target.checked; save(); render(); };
   $$('#exPct button').forEach(b => b.onclick = () => { S().exercise.pct = +b.dataset.p; save(); render(); });
   $('#exHelpS').onclick = openHelp;
-  const refreshNote = () => { $('#pvNote').innerHTML = pvNote(); $$('#aiProv button').forEach(x => x.classList.toggle('on', x.dataset.pv === aiProv())); };
-  $$('#aiProv button').forEach(x => x.onclick = () => { xai.provider = x.dataset.pv; xaiSave(); refreshNote(); });
-  $('#xBk').onchange = e => { xai.inBackup = e.target.checked; xaiSave(); };
+  const refreshNote = () => { $('#pvNote').innerHTML = pvNote(); };
+  $('#xBk').onchange = e => { gai.inBackup = e.target.checked; gaiSave(); };
   $('#xHelp').onclick = openAiHelp;
-  ['xai', 'gemini'].forEach(v => {
-    const g = v === 'gemini', kf = g ? 'gKey' : 'key', mf = g ? 'gModel' : 'model', st = $('#' + v + 'Status');
-    $('#' + v + 'Key').addEventListener('input', e => { xai[kf] = e.target.value.trim(); xaiSave(); st.textContent = xai[kf] ? 'Key saved on this device only.' : 'No key yet.'; refreshNote(); });
-    $('#' + v + 'Model').onchange = e => { xai[mf] = e.target.value; xaiSave(); };
-    $('#' + v + 'Clear').onclick = () => { xai[kf] = ''; xaiSave(); $('#' + v + 'Key').value = ''; st.textContent = 'Key cleared.'; refreshNote(); };
-    $('#' + v + 'Test').onclick = async () => {
-      if (!xai[kf]) { st.textContent = 'Enter a key first.'; return; }
+  { const v = 'gemini', st = $('#geminiStatus');
+    $('#geminiKey').addEventListener('input', e => { gai.gKey = e.target.value.trim(); gaiSave(); st.textContent = gai.gKey ? 'Key saved on this device only.' : 'No key yet.'; refreshNote(); });
+    $('#geminiModel').onchange = e => { gai.gModel = e.target.value; gaiSave(); };
+    $('#geminiClear').onclick = () => { gai.gKey = ''; gaiSave(); $('#geminiKey').value = ''; st.textContent = 'Key cleared.'; refreshNote(); };
+    $('#geminiTest').onclick = async () => {
+      if (!gai.gKey) { st.textContent = 'Enter a key first.'; return; }
       st.textContent = 'Testing…';
       try {
-        const r = g ? await fetch(GEM_URL + '/models?pageSize=1000', { headers: { 'x-goog-api-key': xai[kf] } }) : await fetch(XAI_URL + '/models', { headers: { Authorization: 'Bearer ' + xai[kf] } });
+        const r = await fetch(GEM_URL + '/models?pageSize=1000', { headers: { 'x-goog-api-key': gai.gKey } });
         if (r.ok) {
-          const j = await r.json().catch(() => ({})); const ids = g ? (j.models || []).map(m => String(m.name).replace(/^models\//, '')) : (j.data || []).map(m => m.id);
-          const miss = ids.length && !ids.includes(xai[mf]) && !(g && j.nextPageToken);
-          st.textContent = '✓ Key works.' + (miss ? ` Note: “${xai[mf]}” isn’t in this key’s model list — pick another model.` : '');
+          const j = await r.json().catch(() => ({})); const ids = (j.models || []).map(m => String(m.name).replace(/^models\//, ''));
+          const miss = ids.length && !ids.includes(gai.gModel) && !j.nextPageToken;
+          st.textContent = '✓ Key works.' + (miss ? ` Note: “${gai.gModel}” isn’t in this key’s model list — pick another model.` : '');
         } else {
           const t = await r.text().catch(() => '');
-          st.textContent = /api key/i.test(t) || r.status === 401 ? '✗ This key was rejected. Check it was copied in full.' : r.status === 429 ? '✗ Quota reached (429) — wait and retry.' : `✗ ${PV[v].name} answered ${r.status}.`;
+          st.textContent = /api key/i.test(t) || r.status === 401 ? '✗ This key was rejected. Check it was copied in full.' : r.status === 429 ? '✗ Quota reached (429) — wait and retry.' : `✗ Google answered ${r.status}.`;
         }
-      } catch (e) { st.textContent = '✗ Couldn’t reach ' + PV[v].name + ' — check your connection.'; }
+      } catch (e) { st.textContent = '✗ Couldn’t reach Google — check your connection.'; }
     };
-  });
+  }
   $$('#theme button').forEach(b => b.onclick = () => { S().theme = b.dataset.t; save(); applyTheme(); render(); });
   $('#exp').onclick = () => exportData().then(ok => ok && render());
   $('#imp').onclick = () => $('#impFile').click();
   $('#impFile').onchange = e => { const f = e.target.files[0]; if (f) f.text().then(importText).catch(() => toast('Could not read that file')); e.target.value = ''; };
-  $('#wipe').onclick = () => { if (confirm('Delete ALL entries, foods and settings from this device? This cannot be undone.') && confirm('Really delete everything? Export a backup first if unsure.')) { data = defaults(); xai.key = ''; xai.model = 'grok-4.7'; xai.gKey = ''; xai.gModel = 'gemini-3.8-flash'; xai.provider = ''; xai.inBackup = false; xaiSave(); save(); applyTheme(); ui.day = dayKey(); render(); toast('All data deleted'); } };
+  $('#wipe').onclick = () => { if (confirm('Delete ALL entries, foods and settings from this device? This cannot be undone.') && confirm('Really delete everything? Export a backup first if unsure.')) { data = defaults(); gai.gKey = ''; gai.gModel = 'gemini-3.8-flash'; gai.inBackup = false; gaiSave(); save(); applyTheme(); ui.day = dayKey(); render(); toast('All data deleted'); } };
 }
 
 /* ---------- exercise calories: import / edit / help ---------- */
@@ -899,14 +923,14 @@ function helpHtml() {
 }
 function openHelp() { sheet({ title: 'Apple Watch setup', left: { label: 'Close' }, body: helpHtml() }); }
 
-/* ---------- AI photo estimate (xAI Grok vision) ---------- */
+/* ---------- AI photo estimate (Google Gemini vision) ---------- */
 const AI_SYS = 'You are a careful nutrition estimator. You look at a photo of a meal and estimate what is on the plate. Reply with ONLY one JSON object, no prose, no markdown fences.';
 const AI_PROMPT = `Identify each distinct food or drink in the photo and estimate the portion actually shown.
 Return exactly this JSON shape:
 {"items":[{"name":"string","portion_household":"e.g. 1 cup, 2 slices, 1 medium","portion_grams":number,"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number,"confidence":"low|medium|high"}],"totals":{"calories":number,"protein_g":number,"carbs_g":number,"fat_g":number},"notes":"short string"}
 Rules: numbers are for the whole portion shown (not per 100 g); calories should roughly equal 4*protein + 4*carbs + 9*fat; include cooking fats/sauces you can reasonably infer; split mixed plates into separate items; if the photo has no food return {"items":[],"totals":{"calories":0,"protein_g":0,"carbs_g":0,"fat_g":0},"notes":"no food found"}.`;
-const APP_VERSION = 'v8';
-const AIT = { first: 60000, retry: 40000, xai: 75000, decode: 15000, ...(window.__AIT || {}) }; // request timeouts (ms)
+const APP_VERSION = 'v9';
+const AIT = { first: 60000, retry: 40000, decode: 15000, ...(window.__AIT || {}) }; // request timeouts (ms)
 class AiErr extends Error { constructor(kind, msg, info = {}) { super(msg); this.kind = kind; this.info = info; } }
 const withTimeout = (p, ms, kind, msg) => new Promise((res, rej) => { const t = setTimeout(() => rej(new AiErr(kind, msg)), ms); p.then(v => { clearTimeout(t); res(v); }, e => { clearTimeout(t); rej(e); }); });
 // Decode a picked photo. Tries <img> first, then createImageBitmap; each guarded by a timeout so a stuck HEIC decode can't hang the UI.
@@ -942,13 +966,6 @@ async function fetchT(url, opts, ms, outer, who) {
   } finally { clearTimeout(t); outer?.removeEventListener('abort', onAbort); }
 }
 const jsonOr = t => { try { return JSON.parse(t); } catch (e) { return null; } };
-async function xaiPost(body, signal) {
-  const r = await fetchT(XAI_URL + '/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + xai.key }, body: JSON.stringify(body) }, AIT.xai, signal, 'xAI');
-  const j = jsonOr(r.text);
-  if (r.ok) { if (!j) throw new AiErr('parse', 'xAI sent a reply that wasn’t JSON.', { status: r.status, raw: r.text.slice(0, 200) }); return j; }
-  const m = j ? (j.error?.message || j.error || j.message || '') : r.text;
-  throw aiHttpErr('xai', r.status, typeof m === 'string' ? m : JSON.stringify(m));
-}
 function parseMealJson(text) {
   let t = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim(), j;
   try { j = JSON.parse(t); } catch (e) { const a = t.indexOf('{'), b = t.lastIndexOf('}'); if (a >= 0 && b > a) { try { j = JSON.parse(t.slice(a, b + 1)); } catch (e2) { } } }
@@ -965,16 +982,14 @@ function aiHttpErr(pv, status, m) {
   const nm = PV[pv].name; const raw = String(m || '').slice(0, 400), info = { status, raw, model: aiModel(pv) };
   const E = (k, msg) => new AiErr(k, msg, info);
   if (status === 401 || /api key (not valid|rejected)|incorrect api key|API_KEY_INVALID/i.test(raw)) return E('badkey', `${nm} rejected your API key. Check it in Settings (copy the whole key).`);
-  if (status === 403) return E('forbidden', `${nm} refused the request (403). The key may lack access${pv === 'gemini' ? ', or the Gemini API may not be available in your region' : ' or the account may be out of credits'}.`);
-  if (status === 429) return E('rate', pv === 'gemini'
-    ? 'Gemini’s free-tier quota is used up (429). Free keys have per-minute and per-day request limits (the daily count resets at midnight Pacific). Wait a minute and tap Try again — or try again later, switch model in Settings, or check your usage in Google AI Studio.'
-    : 'xAI says you’re sending too many requests or are out of credits (429). Wait a moment and retry.');
+  if (status === 403) return E('forbidden', `${nm} refused the request (403). The key may lack access${', or the Gemini API may not be available in your region'}.`);
+  if (status === 429) return E('rate', 'Gemini’s free-tier quota is used up (429). Free keys have per-minute and per-day request limits (the daily count resets at midnight Pacific). Wait a minute and tap Try again — or try again later, switch model in Settings, or check your usage in Google AI Studio.');
   if (status === 404) return E('nomodel', `${nm} doesn’t know the model “${aiModel(pv)}” (404).`);
   if (status >= 500) return E('server', `${nm} had a problem (HTTP ${status}). It may be overloaded — try again in a minute.`);
   return E('http' + status, `${nm} couldn’t process this request (HTTP ${status}).`);
 }
 async function geminiPost(model, body, signal, ms) {
-  const r = await fetchT(`${GEM_URL}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': xai.gKey }, body: JSON.stringify(body) }, ms, signal, 'Google Gemini');
+  const r = await fetchT(`${GEM_URL}/models/${encodeURIComponent(model)}:generateContent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': gai.gKey }, body: JSON.stringify(body) }, ms, signal, 'Google Gemini');
   const j = jsonOr(r.text);
   if (r.ok) { if (!j) throw new AiErr('parse', 'Gemini sent a reply that wasn’t JSON.', { status: r.status, model, raw: r.text.slice(0, 200) }); return { j, ms: r.ms }; }
   const e = aiHttpErr('gemini', r.status, j ? (j.error?.message || '') : r.text); e.info.model = model; e.message = e.message.replace(/“[^”]*”/, `“${model}”`); throw e;
@@ -986,8 +1001,8 @@ async function estimateMeal(img, notes, signal, onStatus = () => { }) {
   if (!aiKey(pv)) throw new AiErr('nokey', `Add your ${PV[pv].name} API key in Settings first.`);
   if (navigator.onLine === false) throw new AiErr('offline', 'You’re offline. Photo estimates need an internet connection.');
   const text = AI_PROMPT + (notes ? `\nUser notes about this meal (trust these): ${notes}` : '');
-  if (pv === 'gemini') {
-    const models = [xai.gModel, ...GEM_FALLBACKS.filter(m => m !== xai.gModel)].slice(0, 3), tried = [];
+  {
+    const models = [gai.gModel, ...GEM_FALLBACKS.filter(m => m !== gai.gModel)].slice(0, 3), tried = [];
     for (let k = 0; k < models.length; k++) {
       const model = models[k], ms = k ? AIT.retry : AIT.first;
       const body = { systemInstruction: { parts: [{ text: AI_SYS }] }, contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: dataUrl.split(',')[1] } }, { text }] }], generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 8192, thinkingConfig: { thinkingLevel: 'low' } } };
@@ -1013,16 +1028,7 @@ async function estimateMeal(img, notes, signal, onStatus = () => { }) {
       }
     }
   }
-  const body = { model: xai.model, stream: false, max_completion_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }, { type: 'text', text }] }] };
-  if (/^grok-4\.[567]/.test(xai.model)) body.reasoning_effort = 'low';
-  onStatus(`Sending to xAI (${xai.model}) — ${img.kb} KB…`);
-  let res;
-  try { res = await xaiPost(body, signal); }
-  catch (e) { if (e instanceof AiErr && e.kind === 'http400' && !/api key/i.test(e.info.raw || '')) { delete body.response_format; delete body.reasoning_effort; res = await xaiPost(body, signal); } else { if (e instanceof AiErr) e.info.model = xai.model; throw e; } }
-  onStatus('Reading result…');
-  const msg = res?.choices?.[0]?.message?.content;
-  const out = parseMealJson(Array.isArray(msg) ? msg.map(x => x.text || '').join('') : msg);
-  out.model = res.model || xai.model; return out;
+  throw new AiErr('unknown', 'No answer from Gemini.');
 }
 let aiCtl = null;
 let aiStat = null; // live status line for the wait sheet
@@ -1036,7 +1042,7 @@ function waitSheet(title, first, onCancel) {
 const endStat = () => { if (aiStat) { clearInterval(aiStat.iv); aiStat = null; } };
 function startPhoto(file) {
   if (!aiKey(aiProv())) {
-    sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">Add an API key (free Google Gemini key, or xAI Grok) to use photo estimates. It stays on this device.</div>
+    sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">Add a free Google Gemini API key to use photo estimates. It stays on this device.</div>
       <button class="btn" id="aiToSet">Open Settings</button><button class="btn secondary" id="aiHelp0">How do I get a key?</button></div>`,
       mount: b => { $('#aiToSet', b).onclick = () => { closeSheet(); ui.tab = 'settings'; render(); }; $('#aiHelp0', b).onclick = openAiHelp; } });
     return;
@@ -1062,7 +1068,7 @@ async function runEstimate(img, notes) {
 function aiError(e, retry, img, notes, stage) {
   const kind = e instanceof AiErr ? e.kind : 'unknown'; let msg = e instanceof AiErr ? e.message : 'Something went wrong: ' + (e && e.message ? e.message : e);
   if (e instanceof AiErr && e.info?.tried?.length > 1) msg += ` (Tried ${e.info.tried.length} models.)`;
-  if (kind === 'timeout' && aiProv() === 'gemini') msg += ' Tip: pick “Gemini 3.5 Flash-Lite” in Settings for faster answers, or try again in a minute.';
+  if (kind === 'timeout') msg += ' Tip: pick “Gemini 3.5 Flash-Lite” in Settings for faster answers, or try again in a minute.';
   const needKey = kind === 'badkey' || kind === 'nokey', info = (e instanceof AiErr ? e.info : {}) || {}, pv = aiProv();
   const detail = [`app ${APP_VERSION}`, `stage: ${stage || '?'}`, `provider: ${PV[pv].name}`, `model: ${info.model || aiModel(pv)}`, `error: ${kind}${info.status ? ' / ' + info.status : ''}`, info.raw ? `api says: ${info.raw}` : '', info.tried?.length ? `tried: ${info.tried.join('; ')}` : '', `time: ${new Date().toISOString()}`].filter(Boolean).join('\n');
   sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">${esc(msg)}</div>
@@ -1081,7 +1087,7 @@ function aiError(e, retry, img, notes, stage) {
 function openAiReview(img, notes, out) {
   const items = out.items;
   if (!items.length) { aiError(new AiErr('empty', 'The AI didn’t see any food in that photo' + (out.notes ? ` (“${out.notes}”)` : '') + '. Try a closer, brighter shot.'), null, img, notes, 'review'); return; }
-  const st = { mode: 'sep', meal: '' };
+  const st = { mode: 'sep', meal: '', mealSel: curMeal() };
   const line = i => ({ cal: i.cal * i.mult, p: i.p * i.mult, c: i.c * i.mult, f: i.f * i.mult });
   const tots = () => items.filter(i => i.on).reduce((a, i) => { const l = line(i); a.cal += l.cal; a.p += l.p; a.c += l.c; a.f += l.f; a.n++; return a; }, { cal: 0, p: 0, c: 0, f: 0, n: 0 });
   const rowHtml = (i, k) => `<div class="aiitem ${i.on ? '' : 'off'}" data-i="${k}">
@@ -1093,15 +1099,16 @@ function openAiReview(img, notes, out) {
     <div class="airow-top"><img class="aithumb sm" src="${img.url}" alt=""><div class="note warn" style="flex:1"><b>AI estimate — may be off.</b> Check portions and edit anything that looks wrong before logging.${out.notes ? `<br><i>${esc(out.notes)}</i>` : ''}${out.via ? `<br><small>${esc(out.via)}</small>` : ''}</div></div>
     <div class="aitot card" id="aiTot"></div>
     <div id="aiItems">${items.map(rowHtml).join('')}</div>
-    <div class="seg" id="aiMode" style="margin:14px 0 8px"><button data-m="sep" class="on">Separate entries</button><button data-m="one">One combined meal</button></div>
+    <div style="margin:14px 0 0">${mealSeg('aiMealSel', st.mealSel)}</div>
+    <div class="seg" id="aiMode" style="margin:10px 0 8px"><button data-m="sep" class="on">Separate entries</button><button data-m="one">One combined meal</button></div>
     <div class="card hidden" id="aiMealWrap"><div class="field"><label for="aiMeal">Meal name</label><input type="text" id="aiMeal" placeholder="Photo meal" autocomplete="off"></div></div>
     <button class="btn" id="aiLog" style="margin-top:12px">Log</button>
     <button class="btn gray" id="aiRe" style="margin-top:10px">Re-run with different notes</button></div>`;
   const doLog = () => {
     const on = items.filter(i => i.on); if (!on.length) { toast('Turn on at least one item'); return; }
     const arr = data.entries[ui.day] = data.entries[ui.day] || [], ts = Date.now();
-    if (st.mode === 'sep') on.forEach((i, k) => arr.push({ id: uid(), name: i.name.trim() || 'Food', serving: i.port.trim() || '1 serving', servings: i.mult, cal: i.cal, p: i.p, c: i.c, f: i.f, barcode: '', foodId: '', g: null, ai: true, ts: ts + k }));
-    else { const t = tots(); const nm = ($('#aiMeal').value.trim()) || ('Photo meal: ' + on.map(i => i.name.trim()).join(', ')).slice(0, 80); arr.push({ id: uid(), name: nm, serving: `${on.length} item${on.length > 1 ? 's' : ''} (AI estimate)`, servings: 1, cal: r0(t.cal), p: Math.round(t.p * 10) / 10, c: Math.round(t.c * 10) / 10, f: Math.round(t.f * 10) / 10, barcode: '', foodId: '', g: null, ai: true, ts }); }
+    if (st.mode === 'sep') on.forEach((i, k) => arr.push({ id: uid(), name: i.name.trim() || 'Food', serving: i.port.trim() || '1 serving', servings: i.mult, cal: i.cal, p: i.p, c: i.c, f: i.f, barcode: '', foodId: '', g: null, ai: true, meal: st.mealSel, ts: ts + k }));
+    else { const t = tots(); const nm = ($('#aiMeal').value.trim()) || ('Photo meal: ' + on.map(i => i.name.trim()).join(', ')).slice(0, 80); arr.push({ id: uid(), name: nm, serving: `${on.length} item${on.length > 1 ? 's' : ''} (AI estimate)`, servings: 1, cal: r0(t.cal), p: Math.round(t.p * 10) / 10, c: Math.round(t.c * 10) / 10, f: Math.round(t.f * 10) / 10, barcode: '', foodId: '', g: null, ai: true, meal: st.mealSel, ts }); }
     save(); closeSheet(); render(); toast(`Logged ${st.mode === 'sep' ? on.length + ' item' + (on.length > 1 ? 's' : '') : 'meal'} · ${r0(tots().cal)} kcal`);
   };
   sheet({ title: 'Review estimate', left: { label: 'Back', fn: () => openPhotoPrep(img, notes) }, right: { label: 'Log', fn: doLog }, body,
@@ -1126,36 +1133,33 @@ function openAiReview(img, notes, out) {
         $('.aiMinus', el).onclick = () => setM(i.mult - 0.25 < 0.05 ? 0.25 : i.mult - 0.25); $('.aiPlus', el).onclick = () => setM(i.mult + 0.25);
       });
       $$('#aiMode button', b).forEach(x => x.onclick = () => { st.mode = x.dataset.m; $$('#aiMode button', b).forEach(y => y.classList.toggle('on', y === x)); $('#aiMealWrap', b).classList.toggle('hidden', st.mode !== 'one'); upd(); });
+      $$('#aiMealSel button', b).forEach(x => x.onclick = () => { st.mealSel = x.dataset.meal; $$('#aiMealSel button', b).forEach(y => y.classList.toggle('on', y === x)); });
       $('#aiLog', b).onclick = doLog; $('#aiRe', b).onclick = () => openPhotoPrep(img, notes);
       upd();
     } });
 }
 function openAiHelp() {
-  sheet({ title: 'AI photo setup', left: { label: 'Close' }, body: `<div class="help"><div class="note">Take or choose a photo of a meal and an AI vision model (Google Gemini or xAI Grok) estimates calories and macros. You review and edit the result before anything is logged. It’s an estimate — portions and hidden oils are hard to see.</div>
-  <h3>Free option: Google Gemini</h3><ol>
+  sheet({ title: 'AI photo setup', left: { label: 'Close' }, body: `<div class="help"><div class="note">Take or choose a photo of a meal and Google’s Gemini vision model estimates calories and macros. You review and edit the result before anything is logged. It’s an estimate — portions and hidden oils are hard to see.</div>
+  <h3>Get a free Google Gemini key</h3><ol>
    <li>Open <b>aistudio.google.com/apikey</b> in Safari and sign in with a Google account.</li>
    <li>Tap <b>Create API key</b> (pick or create a project when asked) and copy the key (starts with <code>AIza</code>).</li>
-   <li>Here: <b>Settings → AI photo estimates → Google Gemini → API key</b>, paste, tap <b>Test key</b>. If Gemini is your only key it’s used automatically; otherwise choose it in the provider picker.</li>
-   <li>Model: leave <b>Gemini 3.8 Flash</b>, or pick <b>3.5 Flash-Lite</b> if you hit limits.</li></ol>
+   <li>Here: <b>Settings → AI photo estimates → API key</b>, paste, tap <b>Test key</b>.</li>
+   <li>Model: leave <b>Gemini 3.8 Flash</b>, or pick <b>3.5 Flash-Lite</b> if you hit limits or it’s slow. If a model times out or is unavailable the app automatically tries a couple of others.</li></ol>
   <ul><li><b>Free-tier limits:</b> Google applies per-minute and per-day request limits per project (not per key); the daily count resets at midnight Pacific time. Google’s docs don’t print the numbers — they’re shown in AI Studio for your account and can change. When you hit them the app shows “quota used up (429)”: wait a minute, or try later.</li>
    <li><b>Privacy:</b> on the free tier Google may use your prompts and photos to improve its products. The paid tier doesn’t. Don’t send photos you wouldn’t want used that way.</li>
    <li>Free-tier availability can vary by region/account; a 403 can mean the API isn’t available for your account.</li></ul>
-  <h3>Alternative: xAI Grok (pay-as-you-go)</h3><ol>
-   <li>Go to <b>console.x.ai</b>, sign in, add credit under <b>Billing</b> if asked.</li>
-   <li><b>API Keys → Create API key</b>; copy it (starts with <code>xai-</code>) — shown only once.</li>
-   <li>Paste into <b>Settings → AI photo estimates → xAI Grok</b> and tap <b>Test key</b>. Leave the model on <b>Grok 4.7</b>.</li></ol>
   <h3>Use it</h3><ol><li>Today → <b>Add Food</b> → <b>Photo — AI estimate</b> → Take Photo or Photo Library.</li>
    <li>Optionally add notes (“cooked in olive oil”, “half portion”) → <b>Estimate</b>.</li>
-   <li>Review: switch items off, edit names/numbers, change <b>Portion ×</b>, and choose separate entries or one combined meal → <b>Log</b>.</li></ol>
-  <h3>Privacy &amp; keys</h3><ul><li>Keys are stored only in this app’s on-device storage and sent only to their own provider. They’re left out of backup files unless you switch on “Include keys in backup file”.</li>
-   <li>The photo (downscaled to ~1024 px) and your notes are sent to the chosen provider for each estimate. Nothing else is sent.</li>
-   <li>Anyone who can unlock this phone and open the app could see a key in Settings.</li></ul></div>` });
+   <li>Review: pick the meal, switch items off, edit names/numbers, change <b>Portion ×</b>, and choose separate entries or one combined meal → <b>Log</b>.</li></ol>
+  <h3>Privacy &amp; keys</h3><ul><li>Your key is stored only in this app’s on-device storage and sent only to Google. It’s left out of backup files unless you switch on “Include key in backup file”.</li>
+   <li>The photo (downscaled to ~1024 px) and your notes are sent to Google for each estimate. Nothing else is sent.</li>
+   <li>Anyone who can unlock this phone and open the app could see the key in Settings.</li></ul></div>` });
 }
 
 /* ---------- export / import ---------- */
 async function exportData() {
   const stamp = new Date().toISOString();
-  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries, burned: data.burned, ...(xai.inBackup && (xai.key || xai.gKey) ? { xai: { key: xai.key, model: xai.model, gKey: xai.gKey, gModel: xai.gModel, provider: xai.provider } } : {}) }, null, 2);
+  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries, burned: data.burned, ...(gai.inBackup && gai.gKey ? { xai: { gKey: gai.gKey, gModel: gai.gModel } } : {}) }, null, 2);
   const name = `macro-tracker-backup-${dayKey()}.json`;
   const file = new File([payload], name, { type: 'application/json' });
   try {
@@ -1170,10 +1174,8 @@ function importText(text) {
   let j; try { j = JSON.parse(text); } catch (e) { toast('That file isn’t valid JSON'); return; }
   if (!j || typeof j !== 'object' || typeof j.entries !== 'object' || j.entries === null) { toast('That doesn’t look like a Macro Tracker backup'); return; }
   const inc = normalize(j);
-  if (j.xai && typeof j.xai === 'object') { const x = j.xai, ok = v => typeof v === 'string'; let ch = false;
-    if (ok(x.key) && x.key && !xai.key) { xai.key = x.key; if (ok(x.model) && x.model) xai.model = x.model; ch = true; }
-    if (ok(x.gKey) && x.gKey && !xai.gKey) { xai.gKey = x.gKey; if (ok(x.gModel) && x.gModel) xai.gModel = x.gModel; ch = true; }
-    if (ch) xaiSave(); }
+  if (j.xai && typeof j.xai === 'object') { const x = j.xai; // older backups may carry an xAI key: ignore it; only a Gemini key is restored
+    if (typeof x.gKey === 'string' && x.gKey && !gai.gKey) { gai.gKey = x.gKey; if (typeof x.gModel === 'string' && x.gModel) gai.gModel = x.gModel; gaiSave(); } }
   const nE = Object.values(inc.entries).reduce((n, a) => n + (Array.isArray(a) ? a.length : 0), 0);
   sheet({
     title: 'Import Backup', left: { label: 'Cancel' },
