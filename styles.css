@@ -239,3 +239,4 @@ a { color: var(--accent); }
 .aimult { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
 .aimult .aiMult { width: 56px; text-align: center; background: var(--card2); border: 0; border-radius: 9px; padding: 7px 2px; font-size: 16px; outline: 0; color: var(--text); }
 .aimult .aicount { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 13px; }
+.field input[type=password] { flex: 1; min-width: 0; text-align: right; background: none; border: 0; outline: 0; padding: 12px 0; font-size: 17px; }

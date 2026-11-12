@@ -58,7 +58,14 @@ const totalsOf = list => list.reduce((a, e) => { const s = e.servings; a.cal += 
 const XKEY = 'macrotracker.xai';
 const XAI_URL = 'https://api.x.ai/v1';
 const XAI_MODELS = [['grok-4.7', 'Grok 4.7 — recommended'], ['grok-4.6', 'Grok 4.6'], ['grok-4.5', 'Grok 4.5'], ['grok-4.3', 'Grok 4.3 (cheaper)']];
-const xai = (() => { const d = { key: '', model: 'grok-4.7', inBackup: false }; try { return { ...d, ...JSON.parse(localStorage.getItem(XKEY) || '{}') }; } catch (e) { return d; } })();
+const GEM_URL = 'https://generativelanguage.googleapis.com/v1beta';
+const GEM_MODELS = [['gemini-3.8-flash', 'Gemini 3.8 Flash — recommended'], ['gemini-3.6-flash', 'Gemini 3.6 Flash'], ['gemini-3.5-flash-lite', 'Gemini 3.5 Flash-Lite (lightest)']];
+const PV = { xai: { name: 'xAI Grok', host: 'api.x.ai' }, gemini: { name: 'Google Gemini', host: 'generativelanguage.googleapis.com' } };
+const xai = (() => { const d = { key: '', model: 'grok-4.7', gKey: '', gModel: 'gemini-3.8-flash', provider: '', inBackup: false }; try { return { ...d, ...JSON.parse(localStorage.getItem(XKEY) || '{}') }; } catch (e) { return d; } })();
+const aiKey = pv => pv === 'gemini' ? xai.gKey : xai.key;
+const aiModel = pv => pv === 'gemini' ? xai.gModel : xai.model;
+// Provider in use: the one picked, unless it has no key and the other does. With no explicit pick, Gemini wins only if it's the only key set.
+const aiProv = () => { const want = xai.provider === 'gemini' || xai.provider === 'xai' ? xai.provider : (xai.gKey && !xai.key ? 'gemini' : 'xai'); const other = want === 'xai' ? 'gemini' : 'xai'; return !aiKey(want) && aiKey(other) ? other : want; };
 const xaiSave = () => { try { localStorage.setItem(XKEY, JSON.stringify(xai)); } catch (e) { toast('Could not save — storage is full or blocked'); } };
 
 /* ---------- state / ui helpers ---------- */
@@ -715,6 +722,19 @@ function bindHistory() {
 }
 
 /* ---------- SETTINGS ---------- */
+function pvNote() {
+  const v = aiProv(), picked = xai.provider === 'gemini' || xai.provider === 'xai' ? xai.provider : null;
+  if (!aiKey('xai') && !aiKey('gemini')) return 'No key yet — add one below to use the Photo button.';
+  return `Photo estimates use <b>${PV[v].name}</b>${picked && picked !== v ? ` (${PV[picked].name} has no key yet)` : !picked && v === 'gemini' ? ' (the only key you’ve added)' : ''}.`;
+}
+function provBlock(v) {
+  const g = v === 'gemini', list = g ? GEM_MODELS : XAI_MODELS, cur = aiModel(v), key = aiKey(v);
+  return `<div class="section-title" style="margin-top:14px">${PV[v].name}${g ? ' <span style="text-transform:none;letter-spacing:0">— free tier available</span>' : ''}</div>
+  <div class="card"><div class="field"><label for="${v}Key">API key</label><input type="password" id="${v}Key" value="${esc(key)}" placeholder="${g ? 'AIza…' : 'xai-…'}" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+    <div class="field"><label for="${v}Model">Model</label><select id="${v}Model">${list.map(([m, l]) => `<option value="${m}" ${cur === m ? 'selected' : ''}>${l}</option>`).join('')}${list.some(m => m[0] === cur) ? '' : `<option selected value="${esc(cur)}">${esc(cur)}</option>`}</select></div></div>
+  <div class="btn-row" style="margin-top:8px"><button class="btn secondary" id="${v}Test">Test key</button><button class="btn danger" id="${v}Clear">Clear key</button></div>
+  <div class="foot" id="${v}Status">${key ? 'Key saved on this device only.' : 'No key yet.'}</div>`;
+}
 function viewSettings() {
   const t = S().targets, auto = S().calMode === 'auto';
   const total = Object.values(data.entries).reduce((n, a) => n + a.length, 0);
@@ -732,14 +752,13 @@ function viewSettings() {
     <div class="field" style="padding:8px 16px"><span style="flex:none">Count</span><div class="seg" id="exPct" style="flex:1;margin-left:12px">${[50, 75, 100].map(x => `<button data-p="${x}" class="${exPct() === x ? 'on' : ''}">${x}%</button>`).join('')}</div></div></div>
   <div class="foot">Your daily target goes up by this share of the active calories burned that day. Watch estimates tend to run high, so 50–75% is a common, safer choice. Resting energy is never added — your base target already covers it.</div>
   <div class="stack" style="margin-top:12px"><button class="btn secondary" id="exHelpS">Apple Watch / Shortcut setup…</button></div>
-  <div class="section-title">AI photo estimates (xAI Grok)</div>
-  <div class="card"><div class="field"><label for="xKey">xAI API key</label><input type="password" id="xKey" value="${esc(xai.key)}" placeholder="xai-…" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
-    <div class="field"><label for="xModel">Model</label><select id="xModel">${XAI_MODELS.map(([v, l]) => `<option value="${v}" ${xai.model === v ? 'selected' : ''}>${l}</option>`).join('')}${XAI_MODELS.some(m => m[0] === xai.model) ? '' : `<option selected value="${esc(xai.model)}">${esc(xai.model)}</option>`}</select></div>
-    <div class="field"><label for="xBk">Include key in backup file</label><span class="switch"><input type="checkbox" id="xBk" ${xai.inBackup ? 'checked' : ''}></span></div></div>
-  <div class="btn-row" style="margin-top:10px"><button class="btn secondary" id="xTest">Test key</button><button class="btn danger" id="xClear">Clear key</button></div>
-  <div class="foot" id="xStatus">${xai.key ? 'Key saved on this device only.' : 'No key yet — add one to use the Photo button.'}</div>
-  <div class="foot">Your key is stored only in this app’s on-device storage and sent only to api.x.ai. Photos you analyze are sent to xAI. <button id="xHelp" style="color:var(--accent)">How to get a key…</button></div>
-  <div class="section-title">Appearance</div>
+  <div class="section-title">AI photo estimates</div>
+  <div class="card"><div class="field" style="padding:8px 16px"><div class="seg" id="aiProv" style="flex:1">${['xai', 'gemini'].map(v => `<button data-pv="${v}" class="${aiProv() === v ? 'on' : ''}">${PV[v].name}</button>`).join('')}</div></div></div>
+  <div class="foot" id="pvNote">${pvNote()}</div>
+  ${provBlock('xai')}${provBlock('gemini')}
+  <div class="card" style="margin-top:12px"><div class="field"><label for="xBk">Include keys in backup file</label><span class="switch"><input type="checkbox" id="xBk" ${xai.inBackup ? 'checked' : ''}></span></div></div>
+  <div class="foot">Keys are stored only in this app’s on-device storage (never in the data backup unless the switch above is on) and sent only to the provider they belong to. Photos you analyze are sent to that provider. <button id="xHelp" style="color:var(--accent)">How to get a key…</button></div>
+    <div class="section-title">Appearance</div>
   <div class="card"><div class="field" style="padding:8px 16px"><div class="seg" id="theme" style="flex:1">${['system', 'light', 'dark'].map(x => `<button data-t="${x}" class="${S().theme === x ? 'on' : ''}">${x[0].toUpperCase() + x.slice(1)}</button>`).join('')}</div></div></div>
   <div class="section-title">Backup</div>
   <div class="card"><div class="field"><span>Last backup</span><span class="unit">${le}</span></div><div class="field"><span>Logged entries</span><span class="unit">${total} · ${Object.keys(data.foods).length} foods</span></div></div>
@@ -756,25 +775,36 @@ function bindSettings() {
   $('#exOn').onchange = e => { S().exercise.on = e.target.checked; save(); render(); };
   $$('#exPct button').forEach(b => b.onclick = () => { S().exercise.pct = +b.dataset.p; save(); render(); });
   $('#exHelpS').onclick = openHelp;
-  $('#xKey').addEventListener('input', e => { xai.key = e.target.value.trim(); xaiSave(); $('#xStatus').textContent = xai.key ? 'Key saved on this device only.' : 'No key yet — add one to use the Photo button.'; });
-  $('#xModel').onchange = e => { xai.model = e.target.value; xaiSave(); };
+  const refreshNote = () => { $('#pvNote').innerHTML = pvNote(); $$('#aiProv button').forEach(x => x.classList.toggle('on', x.dataset.pv === aiProv())); };
+  $$('#aiProv button').forEach(x => x.onclick = () => { xai.provider = x.dataset.pv; xaiSave(); refreshNote(); });
   $('#xBk').onchange = e => { xai.inBackup = e.target.checked; xaiSave(); };
-  $('#xClear').onclick = () => { xai.key = ''; xaiSave(); $('#xKey').value = ''; $('#xStatus').textContent = 'Key cleared.'; };
   $('#xHelp').onclick = openAiHelp;
-  $('#xTest').onclick = async () => {
-    const st = $('#xStatus'); if (!xai.key) { st.textContent = 'Enter a key first.'; return; }
-    st.textContent = 'Testing…';
-    try {
-      const r = await fetch(XAI_URL + '/models', { headers: { Authorization: 'Bearer ' + xai.key } });
-      if (r.ok) { const j = await r.json().catch(() => ({})); const ids = (j.data || []).map(m => m.id); st.textContent = '✓ Key works.' + (ids.length && !ids.includes(xai.model) ? ` Note: “${xai.model}” isn’t in this key’s model list.` : ''); }
-      else { const t = await r.text().catch(() => ''); st.textContent = /api key/i.test(t) || r.status === 401 ? '✗ xAI rejected this key. Check it was copied in full.' : `✗ xAI answered ${r.status}.`; }
-    } catch (e) { st.textContent = '✗ Couldn’t reach xAI — check your connection.'; }
-  };
+  ['xai', 'gemini'].forEach(v => {
+    const g = v === 'gemini', kf = g ? 'gKey' : 'key', mf = g ? 'gModel' : 'model', st = $('#' + v + 'Status');
+    $('#' + v + 'Key').addEventListener('input', e => { xai[kf] = e.target.value.trim(); xaiSave(); st.textContent = xai[kf] ? 'Key saved on this device only.' : 'No key yet.'; refreshNote(); });
+    $('#' + v + 'Model').onchange = e => { xai[mf] = e.target.value; xaiSave(); };
+    $('#' + v + 'Clear').onclick = () => { xai[kf] = ''; xaiSave(); $('#' + v + 'Key').value = ''; st.textContent = 'Key cleared.'; refreshNote(); };
+    $('#' + v + 'Test').onclick = async () => {
+      if (!xai[kf]) { st.textContent = 'Enter a key first.'; return; }
+      st.textContent = 'Testing…';
+      try {
+        const r = g ? await fetch(GEM_URL + '/models?pageSize=1000', { headers: { 'x-goog-api-key': xai[kf] } }) : await fetch(XAI_URL + '/models', { headers: { Authorization: 'Bearer ' + xai[kf] } });
+        if (r.ok) {
+          const j = await r.json().catch(() => ({})); const ids = g ? (j.models || []).map(m => String(m.name).replace(/^models\//, '')) : (j.data || []).map(m => m.id);
+          const miss = ids.length && !ids.includes(xai[mf]) && !(g && j.nextPageToken);
+          st.textContent = '✓ Key works.' + (miss ? ` Note: “${xai[mf]}” isn’t in this key’s model list — pick another model.` : '');
+        } else {
+          const t = await r.text().catch(() => '');
+          st.textContent = /api key/i.test(t) || r.status === 401 ? '✗ This key was rejected. Check it was copied in full.' : r.status === 429 ? '✗ Quota reached (429) — wait and retry.' : `✗ ${PV[v].name} answered ${r.status}.`;
+        }
+      } catch (e) { st.textContent = '✗ Couldn’t reach ' + PV[v].name + ' — check your connection.'; }
+    };
+  });
   $$('#theme button').forEach(b => b.onclick = () => { S().theme = b.dataset.t; save(); applyTheme(); render(); });
   $('#exp').onclick = () => exportData().then(ok => ok && render());
   $('#imp').onclick = () => $('#impFile').click();
   $('#impFile').onchange = e => { const f = e.target.files[0]; if (f) f.text().then(importText).catch(() => toast('Could not read that file')); e.target.value = ''; };
-  $('#wipe').onclick = () => { if (confirm('Delete ALL entries, foods and settings from this device? This cannot be undone.') && confirm('Really delete everything? Export a backup first if unsure.')) { data = defaults(); xai.key = ''; xai.model = 'grok-4.7'; xai.inBackup = false; xaiSave(); save(); applyTheme(); ui.day = dayKey(); render(); toast('All data deleted'); } };
+  $('#wipe').onclick = () => { if (confirm('Delete ALL entries, foods and settings from this device? This cannot be undone.') && confirm('Really delete everything? Export a backup first if unsure.')) { data = defaults(); xai.key = ''; xai.model = 'grok-4.7'; xai.gKey = ''; xai.gModel = 'gemini-3.8-flash'; xai.provider = ''; xai.inBackup = false; xaiSave(); save(); applyTheme(); ui.day = dayKey(); render(); toast('All data deleted'); } };
 }
 
 /* ---------- exercise calories: import / edit / help ---------- */
@@ -881,12 +911,7 @@ async function xaiPost(body, signal) {
   catch (e) { if (e && e.name === 'AbortError') throw e; throw new AiErr('network', 'Couldn’t reach xAI. Check your connection and try again.'); }
   if (r.ok) return r.json();
   const t = await r.text().catch(() => ''); let m = ''; try { const j = JSON.parse(t); m = j.error?.message || j.error || j.message || ''; } catch (e) { m = t; }
-  m = String(m || '').slice(0, 300);
-  if (r.status === 401 || /api key/i.test(m)) throw new AiErr('badkey', 'xAI rejected your API key. Check it in Settings (copy the whole key from console.x.ai).');
-  if (r.status === 403) throw new AiErr('forbidden', 'xAI refused the request (403). The key may lack access or the account may be out of credits.' + (m ? ' — ' + m : ''));
-  if (r.status === 429) throw new AiErr('rate', 'xAI says you’re sending too many requests or are out of credits (429). Wait a moment and retry.');
-  if (r.status >= 500) throw new AiErr('server', `xAI had a problem (${r.status}). Try again in a minute.`);
-  throw new AiErr('http' + r.status, `xAI couldn’t process this request (${r.status}).${m ? ' ' + m : ''}`);
+  throw aiHttpErr('xai', r.status, typeof m === 'string' ? m : JSON.stringify(m));
 }
 function parseMealJson(text) {
   let t = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim(), j;
@@ -900,25 +925,54 @@ function parseMealJson(text) {
   });
   return { items, notes: String(j.notes || '').slice(0, 300) };
 }
+function aiHttpErr(pv, status, m) {
+  const nm = PV[pv].name; m = String(m || '').slice(0, 300);
+  if (status === 401 || /api key (not valid|rejected)|incorrect api key|API_KEY_INVALID/i.test(m)) return new AiErr('badkey', `${nm} rejected your API key. Check it in Settings (copy the whole key).`);
+  if (status === 403) return new AiErr('forbidden', `${nm} refused the request (403). The key may lack access${pv === 'gemini' ? ', or the Gemini API may not be available in your region' : ' or the account may be out of credits'}.` + (m ? ' — ' + m : ''));
+  if (status === 429) return new AiErr('rate', pv === 'gemini'
+    ? 'Gemini’s free-tier quota is used up (429). Free keys have per-minute and per-day request limits (the daily count resets at midnight Pacific). Wait a minute and tap Try again — or try again later today / tomorrow, switch model in Settings, or check your usage in Google AI Studio.'
+    : 'xAI says you’re sending too many requests or are out of credits (429). Wait a moment and retry.');
+  if (status === 404) return new AiErr('nomodel', `${nm} doesn’t know the model “${aiModel(pv)}”. Pick another model in Settings.`);
+  if (status >= 500) return new AiErr('server', `${nm} had a problem (${status}). Try again in a minute.`);
+  return new AiErr('http' + status, `${nm} couldn’t process this request (${status}).${m ? ' ' + m : ''}`);
+}
+async function geminiPost(body, signal) {
+  let r;
+  try { r = await fetch(`${GEM_URL}/models/${encodeURIComponent(xai.gModel)}:generateContent`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json', 'x-goog-api-key': xai.gKey }, body: JSON.stringify(body) }); }
+  catch (e) { if (e && e.name === 'AbortError') throw e; throw new AiErr('network', 'Couldn’t reach Google. Check your connection and try again.'); }
+  if (r.ok) return r.json();
+  const t = await r.text().catch(() => ''); let m = ''; try { const j = JSON.parse(t); m = j.error?.message || ''; } catch (e) { m = t; }
+  throw aiHttpErr('gemini', r.status, m);
+}
 async function estimateMeal(dataUrl, notes, signal) {
-  if (!xai.key) throw new AiErr('nokey', 'Add your xAI API key in Settings first.');
+  const pv = aiProv();
+  if (!aiKey(pv)) throw new AiErr('nokey', `Add your ${PV[pv].name} API key in Settings first.`);
   if (navigator.onLine === false) throw new AiErr('offline', 'You’re offline. Photo estimates need an internet connection.');
   const text = AI_PROMPT + (notes ? `\nUser notes about this meal (trust these): ${notes}` : '');
-  const body = { model: xai.model, stream: false, max_completion_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }, { type: 'text', text }] }] };
-  if (/^grok-4\.[567]/.test(xai.model)) body.reasoning_effort = 'low';
-  let res;
-  try { res = await xaiPost(body, signal); }
-  catch (e) { // optional params can be rejected by some models: retry once without them
-    if (e instanceof AiErr && /^http400$/.test(e.kind)) { delete body.response_format; delete body.reasoning_effort; res = await xaiPost(body, signal); } else throw e;
+  let res, out;
+  if (pv === 'gemini') {
+    const body = { systemInstruction: { parts: [{ text: AI_SYS }] }, contents: [{ role: 'user', parts: [{ inline_data: { mime_type: 'image/jpeg', data: dataUrl.split(',')[1] } }, { text }] }], generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 8192, thinkingConfig: { thinkingLevel: 'low' } } };
+    try { res = await geminiPost(body, signal); }
+    catch (e) { if (e instanceof AiErr && e.kind === 'http400') { delete body.generationConfig.thinkingConfig; res = await geminiPost(body, signal); } else throw e; }
+    const cand = res?.candidates?.[0];
+    if (!cand) throw new AiErr('parse', res?.promptFeedback?.blockReason ? `Google blocked this photo (${res.promptFeedback.blockReason}). Try a different one.` : 'Gemini returned no answer. Try again.');
+    out = parseMealJson((cand.content?.parts || []).filter(x => !x.thought).map(x => x.text || '').join(''));
+    out.model = res.modelVersion || xai.gModel;
+  } else {
+    const body = { model: xai.model, stream: false, max_completion_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: AI_SYS }, { role: 'user', content: [{ type: 'image_url', image_url: { url: dataUrl, detail: 'high' } }, { type: 'text', text }] }] };
+    if (/^grok-4\.[567]/.test(xai.model)) body.reasoning_effort = 'low';
+    try { res = await xaiPost(body, signal); }
+    catch (e) { if (e instanceof AiErr && e.kind === 'http400') { delete body.response_format; delete body.reasoning_effort; res = await xaiPost(body, signal); } else throw e; }
+    const msg = res?.choices?.[0]?.message?.content;
+    out = parseMealJson(Array.isArray(msg) ? msg.map(x => x.text || '').join('') : msg);
+    out.model = res.model || xai.model;
   }
-  const msg = res?.choices?.[0]?.message?.content;
-  const out = parseMealJson(Array.isArray(msg) ? msg.map(x => x.text || '').join('') : msg);
-  out.model = res.model || xai.model; return out;
+  return out;
 }
 let aiCtl = null;
 function startPhoto(file) {
-  if (!xai.key) {
-    sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">Add your xAI API key to use photo estimates. It stays on this device.</div>
+  if (!aiKey(aiProv())) {
+    sheet({ title: 'Photo estimate', left: { label: 'Close' }, body: `<div class="stack" style="margin-top:10px"><div class="note warn">Add an API key (free Google Gemini key, or xAI Grok) to use photo estimates. It stays on this device.</div>
       <button class="btn" id="aiToSet">Open Settings</button><button class="btn secondary" id="aiHelp0">How do I get a key?</button></div>`,
       mount: b => { $('#aiToSet', b).onclick = () => { closeSheet(); ui.tab = 'settings'; render(); }; $('#aiHelp0', b).onclick = openAiHelp; } });
     return;
@@ -931,12 +985,12 @@ function openPhotoPrep(img, notes) {
     <img class="aithumb" src="${img.url}" alt="Meal photo">
     <div class="card"><div class="field"><input type="text" id="aiNotes" placeholder="Notes (optional) — e.g. cooked in olive oil" value="${esc(notes)}" style="text-align:left" autocomplete="off" enterkeyhint="go"></div></div>
     <button class="btn" id="aiGo">Estimate calories &amp; macros</button>
-    <div class="foot" style="text-align:center">Sent to xAI (${esc(xai.model)}) at ${img.w}×${img.h}. Estimates can be off — you’ll review before logging.</div></div>`,
+    <div class="foot" style="text-align:center">Sent to ${PV[aiProv()].name} (${esc(aiModel(aiProv()))}) at ${img.w}×${img.h}.${aiProv() === 'gemini' ? ' Free-tier requests may be used by Google to improve its products.' : ''} Estimates can be off — you’ll review before logging.</div></div>`,
     mount: b => { const go = () => runEstimate(img, $('#aiNotes', b).value.trim()); $('#aiGo', b).onclick = go; $('#aiNotes', b).onkeydown = e => { if (e.key === 'Enter') go(); }; } });
 }
 async function runEstimate(img, notes) {
   aiCtl?.abort(); const ctl = aiCtl = new AbortController();
-  sheet({ title: 'Photo estimate', left: { label: 'Cancel', fn: () => { ctl.abort(); closeSheet(); } }, body: `<div class="aiwait"><div class="spin"></div><div>Asking Grok to look at your meal…</div><small>Usually 5–30 seconds</small></div>` });
+  sheet({ title: 'Photo estimate', left: { label: 'Cancel', fn: () => { ctl.abort(); closeSheet(); } }, body: `<div class="aiwait"><div class="spin"></div><div>Asking the AI to look at your meal…</div><small>Usually 5–30 seconds</small></div>` });
   const to = setTimeout(() => ctl.abort('timeout'), 90000);
   try { const out = await estimateMeal(img.url, notes, ctl.signal); clearTimeout(to); if (!sheetOpen || ctl.signal.aborted) return; openAiReview(img, notes, out); }
   catch (e) { clearTimeout(to); if (e && e.name === 'AbortError') { if (ctl.signal.reason === 'timeout' && sheetOpen) aiError(new AiErr('timeout', 'xAI took too long to answer. Try again.'), () => runEstimate(img, notes), img, notes); return; } if (sheetOpen) aiError(e, () => runEstimate(img, notes), img, notes); }
@@ -955,7 +1009,7 @@ function aiError(e, retry, img, notes) {
 }
 function openAiReview(img, notes, out) {
   const items = out.items;
-  if (!items.length) { aiError(new AiErr('empty', 'Grok didn’t see any food in that photo' + (out.notes ? ` (“${out.notes}”)` : '') + '. Try a closer, brighter shot.'), null, img, notes); return; }
+  if (!items.length) { aiError(new AiErr('empty', 'The AI didn’t see any food in that photo' + (out.notes ? ` (“${out.notes}”)` : '') + '. Try a closer, brighter shot.'), null, img, notes); return; }
   const st = { mode: 'sep', meal: '' };
   const line = i => ({ cal: i.cal * i.mult, p: i.p * i.mult, c: i.c * i.mult, f: i.f * i.mult });
   const tots = () => items.filter(i => i.on).reduce((a, i) => { const l = line(i); a.cal += l.cal; a.p += l.p; a.c += l.c; a.f += l.f; a.n++; return a; }, { cal: 0, p: 0, c: 0, f: 0, n: 0 });
@@ -1005,25 +1059,31 @@ function openAiReview(img, notes, out) {
     } });
 }
 function openAiHelp() {
-  sheet({ title: 'AI photo setup', left: { label: 'Close' }, body: `<div class="help"><div class="note">Take or choose a photo of a meal and Grok (xAI’s vision model) estimates calories and macros. You review and edit the result before anything is logged. It’s an estimate — portions and hidden oils are hard to see.</div>
-  <h3>Get an xAI API key</h3><ol>
-   <li>On any browser go to <b>console.x.ai</b> and sign in (or create an account).</li>
-   <li>Add credit / a payment method under <b>Billing</b> if the console asks — API use is pay-as-you-go (a photo estimate costs a small fraction of a cent to a few cents).</li>
-   <li>Open <b>API Keys</b> → <b>Create API key</b>. Copy the key (starts with <code>xai-</code>) — it’s shown only once.</li>
-   <li>Here: <b>Settings → AI photo estimates → xAI API key</b>, paste it, tap <b>Test key</b>.</li>
-   <li>Leave the model on <b>Grok 4.7</b> (recommended) unless you want a cheaper one.</li></ol>
+  sheet({ title: 'AI photo setup', left: { label: 'Close' }, body: `<div class="help"><div class="note">Take or choose a photo of a meal and an AI vision model (Google Gemini or xAI Grok) estimates calories and macros. You review and edit the result before anything is logged. It’s an estimate — portions and hidden oils are hard to see.</div>
+  <h3>Free option: Google Gemini</h3><ol>
+   <li>Open <b>aistudio.google.com/apikey</b> in Safari and sign in with a Google account.</li>
+   <li>Tap <b>Create API key</b> (pick or create a project when asked) and copy the key (starts with <code>AIza</code>).</li>
+   <li>Here: <b>Settings → AI photo estimates → Google Gemini → API key</b>, paste, tap <b>Test key</b>. If Gemini is your only key it’s used automatically; otherwise choose it in the provider picker.</li>
+   <li>Model: leave <b>Gemini 3.8 Flash</b>, or pick <b>3.5 Flash-Lite</b> if you hit limits.</li></ol>
+  <ul><li><b>Free-tier limits:</b> Google applies per-minute and per-day request limits per project (not per key); the daily count resets at midnight Pacific time. Google’s docs don’t print the numbers — they’re shown in AI Studio for your account and can change. When you hit them the app shows “quota used up (429)”: wait a minute, or try later.</li>
+   <li><b>Privacy:</b> on the free tier Google may use your prompts and photos to improve its products. The paid tier doesn’t. Don’t send photos you wouldn’t want used that way.</li>
+   <li>Free-tier availability can vary by region/account; a 403 can mean the API isn’t available for your account.</li></ul>
+  <h3>Alternative: xAI Grok (pay-as-you-go)</h3><ol>
+   <li>Go to <b>console.x.ai</b>, sign in, add credit under <b>Billing</b> if asked.</li>
+   <li><b>API Keys → Create API key</b>; copy it (starts with <code>xai-</code>) — shown only once.</li>
+   <li>Paste into <b>Settings → AI photo estimates → xAI Grok</b> and tap <b>Test key</b>. Leave the model on <b>Grok 4.7</b>.</li></ol>
   <h3>Use it</h3><ol><li>Today → <b>Add Food</b> → <b>Photo — AI estimate</b> → Take Photo or Photo Library.</li>
    <li>Optionally add notes (“cooked in olive oil”, “half portion”) → <b>Estimate</b>.</li>
    <li>Review: switch items off, edit names/numbers, change <b>Portion ×</b>, and choose separate entries or one combined meal → <b>Log</b>.</li></ol>
-  <h3>Privacy &amp; cost</h3><ul><li>The key is stored only in this app’s on-device storage and sent only to api.x.ai. It is left out of backup files unless you switch on “Include key in backup file”.</li>
-   <li>The photo (downscaled to ~1024 px) and your notes are sent to xAI for each estimate. Nothing else is sent.</li>
-   <li>Anyone who can unlock this phone and open the app could see the key in Settings — use a key with a spend limit.</li></ul></div>` });
+  <h3>Privacy &amp; keys</h3><ul><li>Keys are stored only in this app’s on-device storage and sent only to their own provider. They’re left out of backup files unless you switch on “Include keys in backup file”.</li>
+   <li>The photo (downscaled to ~1024 px) and your notes are sent to the chosen provider for each estimate. Nothing else is sent.</li>
+   <li>Anyone who can unlock this phone and open the app could see a key in Settings.</li></ul></div>` });
 }
 
 /* ---------- export / import ---------- */
 async function exportData() {
   const stamp = new Date().toISOString();
-  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries, burned: data.burned, ...(xai.inBackup && xai.key ? { xai: { key: xai.key, model: xai.model } } : {}) }, null, 2);
+  const payload = JSON.stringify({ app: 'macro-tracker', version: 1, exportedAt: stamp, settings: S(), foods: data.foods, entries: data.entries, burned: data.burned, ...(xai.inBackup && (xai.key || xai.gKey) ? { xai: { key: xai.key, model: xai.model, gKey: xai.gKey, gModel: xai.gModel, provider: xai.provider } } : {}) }, null, 2);
   const name = `macro-tracker-backup-${dayKey()}.json`;
   const file = new File([payload], name, { type: 'application/json' });
   try {
@@ -1038,7 +1098,10 @@ function importText(text) {
   let j; try { j = JSON.parse(text); } catch (e) { toast('That file isn’t valid JSON'); return; }
   if (!j || typeof j !== 'object' || typeof j.entries !== 'object' || j.entries === null) { toast('That doesn’t look like a Macro Tracker backup'); return; }
   const inc = normalize(j);
-  if (j.xai && typeof j.xai.key === 'string' && j.xai.key && !xai.key) { xai.key = j.xai.key; if (typeof j.xai.model === 'string') xai.model = j.xai.model; xaiSave(); }
+  if (j.xai && typeof j.xai === 'object') { const x = j.xai, ok = v => typeof v === 'string'; let ch = false;
+    if (ok(x.key) && x.key && !xai.key) { xai.key = x.key; if (ok(x.model) && x.model) xai.model = x.model; ch = true; }
+    if (ok(x.gKey) && x.gKey && !xai.gKey) { xai.gKey = x.gKey; if (ok(x.gModel) && x.gModel) xai.gModel = x.gModel; ch = true; }
+    if (ch) xaiSave(); }
   const nE = Object.values(inc.entries).reduce((n, a) => n + (Array.isArray(a) ? a.length : 0), 0);
   sheet({
     title: 'Import Backup', left: { label: 'Cancel' },
