@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Macros</title>
+<meta name="description" content="Simple, private macro tracker. All data stays on your device.">
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Macros">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <main id="view" aria-live="polite"></main>
+  <nav class="tabbar" id="tabbar">
+    <button data-tab="today" class="tab"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="12" cy="12" r="3.5" fill="none" stroke="currentColor" stroke-width="2.2"/></svg><span>Today</span></button>
+    <button data-tab="history" class="tab"><svg viewBox="0 0 24 24"><path d="M5 20V11M12 20V4M19 20v-6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span>History</span></button>
+    <button data-tab="settings" class="tab"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.3" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="8" cy="17" r="2.3" fill="none" stroke="currentColor" stroke-width="2.2"/></svg><span>Settings</span></button>
+  </nav>
+</div>
+<div id="sheetRoot"></div>
+<div id="scanRoot"></div>
+<div id="toast" class="toast" role="status"></div>
+<script src="data/foods-db.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
